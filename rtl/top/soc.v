@@ -52,7 +52,8 @@ module soc #(
       .COMPRESSED_ISA      (0),
       .CATCH_MISALIGN      (1),
       .CATCH_ILLINSN       (1),
-      .REGS_INIT_ZERO      (1)
+      .REGS_INIT_ZERO      (1),
+      .ENABLE_TMR          (1)
   ) cpu (
       .clk         (clk),
       .resetn      (sys_resetn),
