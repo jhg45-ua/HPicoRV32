@@ -11,7 +11,8 @@ TB          ?= tb/tb_soc.v
 PORT        ?= /dev/ttyUSB1
 APP         ?= counter
 FW          ?= counter
-SIM_FAST    ?= 0 # Si es 1, se compila el firmware sin optimizaciones de tamaño para acelerar la simulación
+# Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY en simulación
+SIM_FAST    ?= 0
 
 SIM			?= iverilog
 TRACE		?= 1

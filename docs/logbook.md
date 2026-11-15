@@ -72,3 +72,27 @@ Estudiar las técnicas de tolerancia a fallos del submódulo [`external/harv`](.
 ### Decisiones de diseño para siguientes hitos
 - Mantener la ejecución multiciclo de `picorv32` aplicando TMR selectivo con realimentación (*self-healing*) sobre registros críticos (`reg_pc`, estados de control).
 - Implementar ECC mediante código **Hsiao SEC-DED (39,32)** balanceado con *auto-scrubbing* en el banco de registros (preservando LUTRAM) y controlador *Read-Modify-Write* en [`bram_sp.v`](../rtl/mem/bram_sp.v).
+
+---
+
+## [2026-11-15] — Integración de Verilator como simulador RTL (`build/verilator-sim`)
+
+### Objetivo
+Incorporar **Verilator** (`--binary` con soporte `--timing`) en el [`Makefile`](../Makefile) como alternativa de alta velocidad frente a Icarus Verilog reutilizando directamente los mismos *testbenches* Verilog, manteniendo `iverilog` como simulador por defecto.
+
+### Cambios realizados
+- Selector `SIM ?= iverilog` (`iverilog` | `verilator`) en `make sim`, generando el ejecutable de Verilator en `build/vlt_$(TB_TOP)` mediante `--Mdir` y `--top-module $(TB_TOP)` (`TB_TOP ?= $(basename $(notdir $(TB)))`).
+- Flag `TRACE ?= 1` para habilitar (`--trace` $\rightarrow$ `build/dump.vcd`) o desactivar (`TRACE=0`) el volcado de ondas.
+- Centralización de las supresiones de avisos en `VLT_WARN_FLAGS`, compartida entre `make lint` y `make sim SIM=verilator` (necesaria para puertos de traza sin conectar de `picorv32` en [`soc.v`](../rtl/top/soc.v) y extensiones/truncamientos implícitos de ancho en [`simpleuart.v`](../rtl/periph/simpleuart.v)).
+
+### Verificación y comparativa de rendimiento (`tb_soc.v`, 30 ms / 3M ciclos)
+- **Herramienta:** Verilator `5.054` (compilación C++ paralela con `-j 0`).
+- **Simulación funcional (`make sim SIM_FAST=1 SIM=verilator`):** arranque correcto tras POR, banner UART completo, secuencia en LEDs `0x0001`..`0x0040` con `[SHRV32 Latido] Contador = 0..3` y salida limpia por *timeout* sin `trap` (idéntica a Icarus Verilog).
+- **Tiempos medidos:**
+  - `SIM=verilator TRACE=1`: `1.377 s` de simulación (*walltime*; `1.616 s` en la prueba previa) frente a `~51 s` en `vvp` generando el mismo `build/dump.vcd` (`833 MB`).
+  - `SIM=verilator TRACE=0`: `0.666 s` de simulación al omitir la escritura en disco del VCD.
+- **Linting (`make lint`):** superado sin errores (`0.039 s`).
+
+### Observaciones técnicas
+- **Simulador de 2 estados vs. 4 estados:** Verilator no modela `X` ni `Z` (inicializa los registros a `0` por defecto), por lo que puede ocultar fallos de *reset* o lecturas de memoria no inicializadas que `iverilog` (4 estados) y Vivado sí exponen. Se mantiene `iverilog` como referencia por defecto y Verilator para iteración rápida y futuras campañas largas de inyección de fallos SEU.
+- **Simulación monohilo (`1` hilo) frente a `--threads`:** aunque `-j 0` paraleliza la compilación C++ (`10` hilos), las pruebas con `--threads 4` (`5.386 s` *walltime* con `--trace`) y `--threads 10` (`3.289 s` *walltime* sin `--trace`) resultaron ~4–5× más lentas que en 1 hilo debido al sobrecoste de sincronización entre hilos en cada flanco de reloj sobre un SoC pequeño (~1114 LUTs / 703 FFs). Se mantiene la simulación monohilo salvo que el diseño escale significativamente en futuros hitos.
