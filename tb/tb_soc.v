@@ -75,10 +75,12 @@ module tb_soc;
     end
   end
 
-  // Aborta inmediatamente si la CPU entra en estado trap
+  reg expect_ecc_trap = 1'b0;
+
+  // Aborta inmediatamente si la CPU entra en estado trap no esperado
   always @(posedge clk) begin
-    if (uut.sys_resetn && trap) begin
-      $display("\n[SIM ERROR] La CPU activó TRAP en %0t ns", $time);
+    if (uut.sys_resetn && trap && !expect_ecc_trap) begin
+      $display("\n[SIM ERROR] La CPU activó TRAP inesperado en %0t ns", $time);
       $finish;
     end
   end
@@ -187,6 +189,129 @@ module tb_soc;
     end
   endtask
 
+  // Inyecta un error de 1 bit en el registro rs1 activo y verifica corrección + auto-scrubbing
+  task inject_reg_sbe;
+    input integer bit_pos;
+    reg [ 4:0] target_reg;
+    reg [38:0] golden_word;
+    reg [31:0] golden_data;
+    reg [31:0] cnt_before;
+    begin
+      @(negedge clk);
+      while (uut.cpu.reg_uses_rs1 !== 1'b1) @(negedge clk);
+
+      target_reg = uut.cpu.decoded_rs1;
+      golden_word = uut.cpu.cpuregs[target_reg];
+      golden_data = uut.cpu.cpuregs_rs1;
+      cnt_before = uut.cpu.count_ecc_reg_sbu;
+
+      uut.cpu.cpuregs[target_reg] = golden_word ^ (39'd1 << bit_pos);
+
+      #1;
+      if (uut.cpu.cpuregs_rs1 !== golden_data ||
+          uut.cpu.regs_sbe1   !== 1'b1        ||
+          uut.cpu.regs_dbe1   !== 1'b0        ||
+          uut.cpu.cpuregs_scrub1 !== 1'b1) begin
+        $display("[ECC FAIL] SBE bit=%0d x%0d @ %0t ns: fallo en correccion combinacional",
+                 bit_pos, target_reg, $time);
+        $finish;
+      end
+
+      @(posedge clk);
+      #1;
+      if (uut.cpu.cpuregs[target_reg] !== golden_word ||
+          uut.cpu.count_ecc_reg_sbu   !== cnt_before + 1) begin
+        $display("[ECC FAIL] SBE bit=%0d x%0d @ %0t ns: fallo en auto-scrubbing/CSR", bit_pos,
+                 target_reg, $time);
+        $finish;
+      end
+
+      $display("[ECC PASS @ %0t ns] SBE x%0d bit=%0d | count_ecc_reg_sbu=%0d", $time, target_reg,
+               bit_pos, uut.cpu.count_ecc_reg_sbu);
+    end
+  endtask
+
+  // Comprueba que un DBE en rs2 especulativo NO dispara trap ni falsa telemetría
+  task check_reg_dbe_speculative;
+    input [38:0] mask2;
+    reg [ 4:0] target_reg;
+    reg [38:0] golden_word;
+    reg [31:0] cnt_before;
+    begin
+      @(negedge clk);
+      while (!(uut.cpu.cpu_state == uut.cpu.cpu_state_ld_rs1 &&
+               uut.cpu.reg_uses_rs2 === 1'b0 &&
+               uut.cpu.decoded_rs2 != 5'd0 &&
+               uut.cpu.decoded_rs2 != uut.cpu.decoded_rs1)) @(negedge clk);
+
+      target_reg  = uut.cpu.decoded_rs2;
+      golden_word = uut.cpu.cpuregs[target_reg];
+      cnt_before  = uut.cpu.count_ecc_reg_dbu;
+
+      uut.cpu.cpuregs[target_reg] = golden_word ^ mask2;
+
+      #1;
+      if (uut.cpu.regs_dbe2 !== 1'b1 || uut.cpu.reg_dbe_event !== 1'b0) begin
+        $display("[ECC FAIL] DBE especulativo x%0d @ %0t ns: filtro no bloqueo el falso positivo",
+                 target_reg, $time);
+        $finish;
+      end
+
+      @(posedge clk);
+      #1;
+      // Restaura el registro para no contaminar lecturas legítimas posteriores
+      uut.cpu.cpuregs[target_reg] = golden_word;
+
+      if (uut.cpu.count_ecc_reg_dbu !== cnt_before || trap !== 1'b0) begin
+        $display("[ECC FAIL] DBE especulativo x%0d @ %0t ns: contador o trap alterado",
+                 target_reg, $time);
+        $finish;
+      end
+
+      $display("[ECC PASS @ %0t ns] Falso positivo bloqueado en rs2 especulativo (x%0d)",
+               $time, target_reg);
+    end
+  endtask
+
+  // Inyecta un error doble real en rs1 consumido y verifica trap controlado + DBU=1
+  task inject_reg_dbe_fatal;
+    input [38:0] mask2;
+    reg [ 4:0] target_reg;
+    reg [38:0] golden_word;
+    reg [31:0] cnt_before;
+    begin
+      @(negedge clk);
+      while (uut.cpu.reg_uses_rs1 !== 1'b1) @(negedge clk);
+
+      target_reg  = uut.cpu.decoded_rs1;
+      golden_word = uut.cpu.cpuregs[target_reg];
+      cnt_before  = uut.cpu.count_ecc_reg_dbu;
+
+      uut.cpu.cpuregs[target_reg] = golden_word ^ mask2;
+
+      #1;
+      if (uut.cpu.regs_dbe1 !== 1'b1 || uut.cpu.reg_dbe_event !== 1'b1) begin
+        $display("[ECC FAIL] DBE fatal x%0d @ %0t ns: no detectado", target_reg, $time);
+        $finish;
+      end
+
+      // Ciclo 1: salta a cpu_state_trap y cuenta +1; Ciclos 2..5: activa trap=1 sin recontar
+      repeat (5) @(posedge clk);
+      #1;
+      if (trap !== 1'b1 ||
+          uut.cpu.cpu_state         !== uut.cpu.cpu_state_trap ||
+          uut.cpu.count_ecc_reg_dbu !== cnt_before + 1         ||
+          uut.cpu.mem_valid         !== 1'b0) begin
+        $display("[ECC FAIL] DBE fatal x%0d @ %0t ns: trap=%b dbu=%0d (esp %0d)",
+                 target_reg, $time, trap, uut.cpu.count_ecc_reg_dbu, cnt_before + 1);
+        $finish;
+      end
+
+      $display("[ECC PASS @ %0t ns] DBE fatal x%0d -> trap controlado | count_ecc_reg_dbu=%0d",
+               $time, target_reg, uut.cpu.count_ecc_reg_dbu);
+    end
+  endtask
+
   // Campaña de inyección SEU entre el primer y el segundo latido UART (entre LED 0x0001 y 0x0010)
   initial begin
     wait (uut.sys_resetn === 1'b1);
@@ -203,7 +328,20 @@ module tb_soc;
     inject_ctrl_seu(4, 8'h03);
     inject_ctrl_seu(6, 8'h1F);
 
-    $display("[SEU OK] Campana completada sin traps ni corrupcion.");
+    // 3 SBEs en cpuregs (LSB dato, MSB dato y bit de paridad [35]) + filtro especulativo
+    inject_reg_sbe(0);
+    inject_reg_sbe(31);
+    inject_reg_sbe(35);
+    check_reg_dbe_speculative(39'h0000_0003);
+
+    $display("[SEU/ECC OK] Campana recuperable completada sin traps ni corrupcion.");
+
+    // Espera al latido UART Contador = 1 (PC=3 CTRL=4 SBU=3 DBU=0) antes del trap fatal
+    wait (leds == 15'h0020);
+    expect_ecc_trap = 1'b1;
+    inject_reg_dbe_fatal(39'h4000_0001);
+    $display("[SIM FIN] Verificacion TMR + ECC cpuregs completada con exito.");
+    $finish;
   end
 
 endmodule

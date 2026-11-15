@@ -27,6 +27,10 @@ void main(void) {
             puthex(tmr_read_pc_err());
             puts(" CTRL=");
             puthex(tmr_read_ctrl_err());
+            puts(" SBU=");
+            puthex(ecc_read_reg_sbu());
+            puts(" DBU=");
+            puthex(ecc_read_reg_dbu());
             puts("\r\n");
         }
 

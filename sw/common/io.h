@@ -7,6 +7,8 @@
 
 #define CSR_TMR_PC_ERR   0xCC0
 #define CSR_TMR_CTRL_ERR 0xCC1
+#define CSR_ECC_REG_SBU  0xCC2
+#define CSR_ECC_REG_DBU  0xCC3
 
 #define _SHRV_READ_CSR(csr) ({              \
     uint32_t _val;                          \
@@ -23,6 +25,8 @@
 
 static inline uint32_t tmr_read_pc_err(void)   { return SHRV_READ_CSR(CSR_TMR_PC_ERR); }
 static inline uint32_t tmr_read_ctrl_err(void) { return SHRV_READ_CSR(CSR_TMR_CTRL_ERR); }
+static inline uint32_t ecc_read_reg_sbu(void)  { return SHRV_READ_CSR(CSR_ECC_REG_SBU); }
+static inline uint32_t ecc_read_reg_dbu(void)  { return SHRV_READ_CSR(CSR_ECC_REG_DBU); }
 
 static inline void putc(char c) {
     if (c == '\n') REG_UART_DATA = '\r';
