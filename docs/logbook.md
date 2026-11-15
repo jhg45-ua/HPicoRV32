@@ -1,6 +1,6 @@
 # Bitácora Técnica — SHRV32
 
-Registro cronológico de hitos, verificaciones en simulación y métricas reales de implementación (*post-route* `impl_1`) en **Digilent Nexys A7-100T** (`xc7a100tcsg324-1`) para comparar la evolución de recursos y frecuencia frente al diseño base.
+Registro cronológico de hitos, verificaciones en simulación y métricas reales de implementación (*post-route* en **Vivado** y **openXC7**) en **Digilent Nexys A7-100T** (`xc7a100tcsg324-1`) para comparar la evolución de recursos y frecuencia frente al diseño base.
 
 ---
 
@@ -118,3 +118,39 @@ Implementar Triple Redundancia Modular (TMR) de grano fino con corrección sínc
 - **Preservación real de las 3 réplicas:** el incremento de `+233` FFs (`+158` FFs de réplicas redundantes + `64` FFs de `count_tmr_pc`/`count_tmr_ctrl` + registros de decodificación/fanout) y la presencia explícita de `cpu/gen_tmr_pc.u_voter_next_pc/` y `cpu/reg_next_pc_r0_reg[28]` en `timing.rpt` confirman que `dont_touch` impidió la fusión booleana en Vivado.
 - **Camino crítico:** `cpu/latched_branch_reg/C` (`FDRE`) $\rightarrow$ `cpu/gen_tmr_pc.u_voter_next_pc/` (`LUT6` + 5 `CARRY4` + `LUT3`, 7 niveles lógicos) $\rightarrow$ `cpu/reg_next_pc_r0_reg[28]/D` (`7.272 ns` de retardo de datos: `2.095 ns` lógica, `5.177 ns` ruta).
 - **Avisos de Vivado:** mismos avisos no bloqueantes que en el Hito 0 (`SYNTH-6` x4 en BRAM y `TIMING-18` x19 en E/S sin restricciones).
+
+---
+
+## [2026-11-15] — Flujo abierto `openXC7` y preservación de TMR en Yosys (`build/openxc7`)
+
+### Objetivo
+Integrar un flujo de síntesis, *place & route*, generación de *bitstream* y programación completamente *open source* con **openXC7** (`SYNTH=openxc7`) en macOS nativo para la **Digilent Nexys A7-100T**, asegurando que **Yosys** conserve físicamente las réplicas TMR sin introducir primitivas propietarias en `rtl/core/`.
+
+### Cambios realizados
+- **Integración dual en [`Makefile`](../Makefile):**
+  - Añadidas variables `SYNTH ?= vivado`, `OPENXC7_DIR` (`build/openxc7`) y `CHIPDB_DIR` (`$(HOME)/.cache/openxc7`), seleccionando el `.bit` objetivo también en `make prog`.
+  - Generación bajo demanda del `chipdb-xc7a100tcsg324-1.bin` (`xilinx_gen.py` + `bbasm`) e implementación mediante `yosys` $\rightarrow$ `nextpnr-xilinx` $\rightarrow$ `fasm2frames` $\rightarrow$ `xc7frames2bit`.
+- **Compatibilidad del fichero de restricciones ([`Nexys-A7-100T-Master.xdc`](../fpga/nexys_a7/Nexys-A7-100T-Master.xdc)):** limpieza de espacios dentro de `{puerto}`, `;` finales y comentarios en la misma línea (manteniendo compatibilidad con Vivado y el parser XDC de `nextpnr-xilinx`).
+- **Preservación de TMR en Yosys ([`picorv32.v`](../rtl/core/picorv32.v) + [`Makefile`](../Makefile)):**
+  - Añadido `keep = "true"` junto a `dont_touch = "true", syn_preserve = 1` en las 5 declaraciones `reg` TMR (`reg_pc_r0..r2`, `reg_next_pc_r0..r2`, `mem_state_r0..r2`, `cpu_state_r0..r2`, `latched_rd_r0..r2`).
+  - Propagación explícita del atributo tras `proc` antes de `synth_xilinx`: `hierarchy -check -top soc; proc; setattr -set keep 1 a:keep %ci1 t:*dff* %i; synth_xilinx -flatten -abc9 -arch xc7 -top soc; write_json soc.json`.
+
+### Verificación en simulación, linting y placa
+- **Lint (`make lint`):** superado sin errores (`Verilator 5.054`).
+- **Simulación:** validados tanto el banco unitario ([`tb_tmr_voter.v`](../tb/tb_tmr_voter.v), `5/5` casos `[PASS]`) como la campaña SEU en [`tb_soc.v`](../tb/tb_soc.v) (`make sim SIM_FAST=1`).
+- **Validación en placa real:** generación de `build/openxc7/shrv32.bit` (`3825904` bytes) y programación correcta en la Nexys A7-100T mediante `make prog SYNTH=openxc7` (`openFPGALoader`), confirmando arranque, LEDs y telemetría UART sin fallos.
+
+### Métricas de implementación en openXC7 (`nextpnr-xilinx` — *Post-Route*)
+- **Herramientas y dispositivo:** `Yosys 0.69` + `nextpnr-xilinx` (`himbaechel`) + `fasm2frames` + `xc7frames2bit` (`/opt/openxc7`) · `xc7a100tcsg324-1` · Reloj `clk` = `100.000 MHz` (`10.000 ns`).
+
+| Recurso / Métrica | Usado | Disponible | Utilización | Notas / Comparativa |
+| --- | ---: | ---: | ---: | --- |
+| **Primitivas LUT (Yosys)** | 1767 | — | — | `255 LUT2` + `388 LUT3` + `214 LUT4` + `634 LUT5` + `276 LUT6` (+ `12 RAM32M`, `126 CARRY4`) |
+| **`SLICE_LUTX` (`nextpnr`)** | 2671 | 126800 | 2 % | Conteo interno de sitios en `nextpnr-xilinx` |
+| **`SLICE_FFX` / FFs totales** | 918 | 126800 | 0 % | `904 FDRE` + `14 FDSE` (vs. `695` FFs antes del arreglo de `keep` y `936` FFs en Vivado Hito 1) |
+| **Block RAM Tile (`RAMB36E1`)** | 4 | 135 | 2 % | `0 / 270 RAMB18E1` (16 KB `bram_sp`, igual que Vivado) |
+| **$F_{\max}$ (`cpu.clk` @ 100 MHz)** | 135.96 MHz | — | PASS | `3 warnings, 0 errors` (vs. $\approx 129.8\text{ MHz}$ en Vivado Hito 1) |
+
+### Observaciones técnicas
+- **Por qué `keep` en `reg` no bastaba en Yosys:** durante `proc_dff`, Yosys hereda atributos desde el bloque `always`, no desde las declaraciones `reg`; y `opt_merge` solo protege biestables si la **celda** FF tiene `keep`. Antes de propagar el atributo mediante `setattr -set keep 1 a:keep %ci1 t:*dff* %i`, Yosys colapsaba las réplicas `_r0/_r1/_r2` reduciendo el diseño a `695` FFs. Etiquetar el `always` principal habría impedido podar registros de depuración sin uso (`dbg_rs1val`, `dbg_rs2val`); la selección tras `proc` conserva exclusivamente los FFs TMR manteniendo `dead_ffs = 0` y *fanout* idéntico entre réplicas en `soc.json` (`reg_pc`: `32x3`, `67/67/67`; `reg_next_pc`: `32x3`, `75/75/75`; `cpu_state`: `8x3`, `21/21/21`; `latched_rd`: `5x3`, `10/10/10`; `mem_state`: `2x3`, `4/4/4`).
+- **Generador de bitstream (`xc7frames2bit` vs `fpga-as`):** en pruebas iniciales con `fpga-as` en macOS el bitstream declaraba longitud `0` en cabecera (`'e'`) y omitía el ECC por *frame*, provocando `Done 0x0` en `openFPGALoader`. El cambio a `fasm2frames` + `xc7frames2bit` genera una cabecera `'e'` exacta (`3825788` bytes de payload) y carga limpiamente en la placa.
