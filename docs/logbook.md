@@ -72,3 +72,49 @@ Estudiar las técnicas de tolerancia a fallos del submódulo [`external/harv`](.
 ### Decisiones de diseño para siguientes hitos
 - Mantener la ejecución multiciclo de `picorv32` aplicando TMR selectivo con realimentación (*self-healing*) sobre registros críticos (`reg_pc`, estados de control).
 - Implementar ECC mediante código **Hsiao SEC-DED (39,32)** balanceado con *auto-scrubbing* en el banco de registros (preservando LUTRAM) y controlador *Read-Modify-Write* en [`bram_sp.v`](../rtl/mem/bram_sp.v).
+
+---
+
+## [2026-11-15] — Hito 1: TMR selectivo con *self-healing* y telemetría CSR (`feature/tmr`)
+
+### Objetivo
+Implementar Triple Redundancia Modular (TMR) de grano fino con corrección síncrona en 1 ciclo (*self-healing*) sobre el camino de PC y registros críticos de control de `picorv32`, exponiendo contadores de fallos en CSRs de solo lectura y validando mediante inyección de SEUs por máscaras XOR e implementación en Vivado.
+
+### Cambios realizados
+- **Votador combinacional reutilizable ([`tmr_voter.v`](../rtl/core/tmr_voter.v)):** votador 2-de-3 parametrizado por ancho (`WIDTH`) con detección simétrica de discrepancia (`err`) y atributos de preservación (`keep`, `syn_keep`) frente a optimizaciones de síntesis.
+- **Protección de dominio PC y control en [`picorv32.v`](../rtl/core/picorv32.v) (controlado por `ENABLE_TMR`, activo en [`soc.v`](../rtl/top/soc.v)):**
+  - Triplicación con `dont_touch` / `syn_preserve` sobre `reg_pc`, `reg_next_pc` (32 bits), `cpu_state` (8 bits), `mem_state` (2 bits) y `latched_rd` (`regindex_bits` bits), además de reset explícito de `decoded_rd` y `latched_rd` para evitar propagación de `X` al votador.
+  - Patrón *self-healing* sin condiciones de carrera dentro del mismo `always @(posedge clk)`: inicialización por defecto `next_<reg> = <voted>` al comienzo del ciclo y escritura simultánea en `_r0/_r1/_r2 <= next_<reg>` al final.
+- **Telemetría CSR y soporte en firmware:**
+  - Nuevos CSRs custom User R/O (`0xCC0` $\rightarrow$ `count_tmr_pc`, `0xCC1` $\rightarrow$ `count_tmr_ctrl`) en [`picorv32.v`](../rtl/core/picorv32.v) muestreados síncronamente en el flanco previo a la reparación por *self-healing*.
+  - Lectura mediante `.option push / .option arch, +zicsr / csrr / .option pop` + `puthex()` en [`io.h`](../sw/common/io.h) (conservando `-march=rv32i` estricto en el resto del firmware) e impresión en el latido UART de [`main.c`](../sw/apps/counter/main.c) (`counter.elf`: `728` B; `bootloader.elf`: `564` B).
+
+### Verificación en simulación y linting
+- **Test unitario ([`tb_tmr_voter.v`](../tb/tb_tmr_voter.v)):** 5/5 pruebas superadas (`make sim TB=tb/tb_tmr_voter.v`) incluyendo fallo de 1 bit, multi-bit en una réplica, bits disjuntos en múltiples réplicas y límite 2-de-3 en el mismo bit.
+- **Test SoC con inyección SEU ([`tb_soc.v`](../tb/tb_soc.v)):** `make sim SIM_FAST=1` superado sin `trap` hasta `50 ms` (`LEDs = 0x0060`):
+  - Buffer de línea UART para evitar solapamientos con el monitor de LEDs.
+  - Campaña de 7 inyecciones XOR (`inject_pc_seu` x3 sobre `reg_pc_r0`, `reg_pc_r1` multi-bit y `reg_next_pc_r1`; `inject_ctrl_seu` x4 sobre `cpu_state_r0`, `cpu_state_r2`, `mem_state_r1` y `latched_rd_r0`), verificando enmascaramiento inmediato, *self-healing* en `10 ns` (`1` ciclo) y lectura exacta por UART (`PC=00000003 CTRL=00000004` en `Contador = 1..5`).
+- **Verilator (`make lint`):** superado sin avisos en macOS (`Verilator 5.054`). En Linux Workstation (`Verilator 5.036`) falla por flag desconocido `-Wno-PROCASSINIT` en el `Makefile` (pendiente de filtrar según versión).
+
+### Métricas de implementación en Vivado (`impl_1` — *Post-Route*)
+- **Herramienta y dispositivo:** Vivado `v2025.2` (lin64) · `xc7a100tcsg324-1` (`-1`) · Reloj objetivo `sys_clk_pin` = `100.000 MHz` (`10.000 ns`).
+
+| Recurso / Métrica | Usado | Disponible | Utilización | Variación vs. base |
+| --- | ---: | ---: | ---: | --- |
+| **Slice LUTs** | 1429 | 63400 | 2.25 % | `+315` (+28.3 % · `1385` lógica + `44` LUTRAM) |
+| **Slice Registers (FF)** | 936 | 126800 | 0.74 % | `+233` (+33.1 % · `914` `FDRE` + `22` `FDSE`, `0` latches) |
+| **Block RAM Tile (`RAMB36E1`)** | 4 | 135 | 2.96 % | `0` (sin cambios) |
+| **DSPs** | 0 | 240 | 0.00 % | `0` (sin cambios) |
+| **Bonded IOB** | 20 | 210 | 9.52 % | `0` (sin cambios) |
+| **BUFGCTRL** | 1 | 32 | 3.13 % | `0` (sin cambios) |
+
+| Parámetro de Timing (`sys_clk_pin` @ 100 MHz) | Valor | Endpoints con fallo | Notas |
+| --- | ---: | ---: | --- |
+| **WNS (Setup)** | +2.298 ns | 0 / 2691 | $F_{\max}$ estimada $\approx 129.8\text{ MHz}$ (`-1.233 ns` vs. base) |
+| **WHS (Hold)** | +0.110 ns | 0 / 2691 | Cumple holgura mínima |
+| **WPWS (Pulse Width)** | +3.750 ns | 0 / 1029 | Cumple ancho de pulso |
+
+### Observaciones técnicas
+- **Preservación real de las 3 réplicas:** el incremento de `+233` FFs (`+158` FFs de réplicas redundantes + `64` FFs de `count_tmr_pc`/`count_tmr_ctrl` + registros de decodificación/fanout) y la presencia explícita de `cpu/gen_tmr_pc.u_voter_next_pc/` y `cpu/reg_next_pc_r0_reg[28]` en `timing.rpt` confirman que `dont_touch` impidió la fusión booleana en Vivado.
+- **Camino crítico:** `cpu/latched_branch_reg/C` (`FDRE`) $\rightarrow$ `cpu/gen_tmr_pc.u_voter_next_pc/` (`LUT6` + 5 `CARRY4` + `LUT3`, 7 niveles lógicos) $\rightarrow$ `cpu/reg_next_pc_r0_reg[28]/D` (`7.272 ns` de retardo de datos: `2.095 ns` lógica, `5.177 ns` ruta).
+- **Avisos de Vivado:** mismos avisos no bloqueantes que en el Hito 0 (`SYNTH-6` x4 en BRAM y `TIMING-18` x19 en E/S sin restricciones).
