@@ -21,12 +21,13 @@ module tb_ecc_secded;
   integer        errors;
   integer        checks;
 
+  // Cadena bajo prueba: codificador -> canal con ruido XOR -> decodificador
   ecc_secded_enc u_enc (
       .data_i   (tx_data),
       .encoded_o(tx_encoded)
   );
 
-  // Canal con inyección de fallos por radiación (máscara XOR de 39 bits)
+  // Inyección de fallos por radiación mediante máscara XOR sobre los 39 bits
   assign rx_encoded = tx_encoded ^ err_mask;
 
   ecc_secded_dec u_dec (
@@ -37,18 +38,20 @@ module tb_ecc_secded;
       .dbiterr_o(dbiterr)
   );
 
+  // Prueba exhaustiva para una palabra: 1 nominal + 39 SBE + 741 DBE = 781 casos
   task test_word(input [31:0] val);
     integer i;
     integer j;
     reg [6:0] expected_ecc;
     begin
-      // 1. Estado nominal (sin error)
+      // 1. Estado nominal (sin error): captura la paridad esperada de referencia
       tx_data  = val;
       err_mask = 39'd0;
-      #1;  // Propagación combinacional (delta + 1 ns) antes de muestrear
+      #1;  // Espera propagación combinacional antes de muestrear señales
       expected_ecc = tx_encoded[38:32];
       checks = checks + 1;
 
+      // Se usa !== (4 estados) para cazar cualquier X/Z no detectado por !=
       if (rx_data !== val || rx_ecc !== expected_ecc || sbiterr !== 1'b0 || dbiterr !== 1'b0) begin
         $display("[FAIL NOM @ %0t ns] val=%h | rx=%h ecc=%b (esp %b) s=%b d=%b", $time, val,
                  rx_data, rx_ecc, expected_ecc, sbiterr, dbiterr);
@@ -56,9 +59,10 @@ module tb_ecc_secded;
       end
       #9;
 
-      // 2. Todos los 39 errores simples (datos [31:0] + paridad [38:32])
+      // 2. Todos los 39 errores simples (datos [31:0] y bits de paridad [38:32])
+      // Verifica que tanto rx_data como rx_ecc salen corregidos (necesario para scrubbing)
       for (i = 0; i < 39; i = i + 1) begin
-        err_mask = (39'd1 << i);
+        err_mask = (39'd1 << i);  // Literal de 39b para alcanzar bits 32..38 sin truncar
         #1;
         checks = checks + 1;
         if (rx_data !== val || rx_ecc !== expected_ecc || sbiterr !== 1'b1 || dbiterr !== 1'b0) begin
@@ -69,7 +73,8 @@ module tb_ecc_secded;
         #9;
       end
 
-      // 3. Todos los 741 errores dobles posibles sobre los 39 bits
+      // 3. Todos los 741 errores dobles posibles sobre los 39 bits (C(39,2))
+      // Debe señalar dbiterr=1 sin activar sbiterr
       for (i = 0; i < 39; i = i + 1) begin
         for (j = i + 1; j < 39; j = j + 1) begin
           err_mask = (39'd1 << i) | (39'd1 << j);
@@ -98,7 +103,7 @@ module tb_ecc_secded;
     err_mask = 39'd0;
     #1;
 
-    // Verificación explícita de que todo-ceros tiene palabra código 39'h0
+    // Comprueba que registros/RAM reseteados a 0 arrancan con código ECC válido
     checks = checks + 1;
     if (tx_encoded !== 39'd0) begin
       $display("[FAIL RESET-ZERO] encoded(0) = %h (esperado 0)", tx_encoded);
@@ -108,6 +113,7 @@ module tb_ecc_secded;
     end
     #9;
 
+    // Barrido de patrones límite (todo-0, todo-1, bits alternos y palabras de prueba)
     test_word(32'h0000_0000);
     test_word(32'hFFFF_FFFF);
     test_word(32'hAAAA_AAAA);

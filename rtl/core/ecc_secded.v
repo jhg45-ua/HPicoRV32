@@ -7,6 +7,9 @@
 
 `timescale 1 ns / 1 ps
 
+// Matriz de paridad Hsiao (39,32): filas balanceadas de 13-14 bits por ecuación.
+// Cada bit de datos aporta exactamente 3 unos (peso impar) en su columna vertical,
+// garantizando que 32'h0 codifique a 39'h0 (válido tras reset-to-zero en FPGA).
 `define HSIAO_P0 32'h00003fff
 `define HSIAO_P1 32'h00ffc00f
 `define HSIAO_P2 32'h1f03c0f1
@@ -16,10 +19,11 @@
 `define HSIAO_P6 32'hd8d23488
 
 module ecc_secded_enc (
-    input  [31:0] data_i,
-    output [38:0] encoded_o
+    input  [31:0] data_i,    // Palabra útil de 32 bits
+    output [38:0] encoded_o  // Palabra sistemática: [38:32] ECC + [31:0] dato
 );
   assign encoded_o[31:0] = data_i;
+  // La reducción XOR con máscara constante solo sintetiza cables activos (sin puertas AND reales)
   assign encoded_o[32]   = ^(data_i & `HSIAO_P0);
   assign encoded_o[33]   = ^(data_i & `HSIAO_P1);
   assign encoded_o[34]   = ^(data_i & `HSIAO_P2);
@@ -30,23 +34,23 @@ module ecc_secded_enc (
 endmodule
 
 module ecc_secded_dec (
-    input  [38:0] encoded_i,
-    output [31:0] data_o,
-    output [ 6:0] ecc_o,
-    output        sbiterr_o,
-    output        dbiterr_o
+    input  [38:0] encoded_i,  // Palabra de 39 bits leída desde registro/memoria
+    output [31:0] data_o,     // Dato de 32 bits (corregido si hay SBE)
+    output [ 6:0] ecc_o,      // Paridad de 7 bits corregida (para auto-scrubbing)
+    output        sbiterr_o,  // 1'b1 si hay error simple corregible (peso de síndrome impar)
+    output        dbiterr_o   // 1'b1 si hay error doble incorregible (peso par != 0)
 );
   wire [31:0] data_rx = encoded_i[31:0];
   wire [ 6:0] ecc_rx = encoded_i[38:32];
 
-  // Recalcula la paridad esperada a partir del dato recibido
+  // Reutiliza el codificador para no duplicar las ecuaciones XOR de la matriz Hsiao
   wire [38:0] reencoded;
   ecc_secded_enc u_reenc (
       .data_i   (data_rx),
       .encoded_o(reencoded)
   );
 
-  // Síndrome: 0 = sin error; != 0 identifica el bit afectado
+  // Síndrome: 0 = sin error; peso impar = 1 error (datos o paridad); peso par != 0 = 2 errores
   wire [6:0] syndrome = ecc_rx ^ reencoded[38:32];
   wire       syn_nonzero = |syndrome;
   wire       syn_odd = ^syndrome;
@@ -65,6 +69,7 @@ module ecc_secded_dec (
   wire [31:0] data_mask;
   wire [ 6:0] ecc_mask;
 
+  // Despliega en paralelo 32 comparadores de columna (peso 3) + 7 de paridad (peso 1)
   genvar i;
   generate
     for (i = 0; i < 32; i = i + 1) begin : gen_data_corr
@@ -77,12 +82,13 @@ module ecc_secded_dec (
     end
   endgenerate
 
-  // Ante error doble (peso par), ninguna columna coincide -> máscaras a 0
+  // Ante error doble (peso par), ninguna columna coincide -> máscaras a 0 sin falsa corrección
   assign data_o = data_rx ^ data_mask;
   assign ecc_o  = ecc_rx ^ ecc_mask;
 
 endmodule
 
+// Limpia macros locales para evitar colisiones al compilar otros archivos
 `undef HSIAO_P0
 `undef HSIAO_P1
 `undef HSIAO_P2
