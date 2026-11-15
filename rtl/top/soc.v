@@ -1,17 +1,18 @@
 // =============================================================================
 // Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
 // Módulo:       soc.v
-// Descripción:  Módulo raíz del SoC base (PicoRV32 + BRAM 16 KB + UART + LEDs)
+// Descripción:  Módulo raíz del SoC Harvard (PicoRV32 TMR + IMEM 8 KB + DMEM 8 KB + UART + LEDs)
 // Reloj/Reset:  clk (flanco subida, 100 MHz) | resetn (activo bajo)
 // =============================================================================
 
 module soc #(
-    parameter integer MEM_SIZE      = 4096,
+    parameter integer IMEM_WORDS    = 2048,                 // 8 KB: 0x0000_0000 - 0x0000_1FFF
+    parameter integer DMEM_WORDS    = 2048,                 // 8 KB: 0x0000_2000 - 0x0000_3FFF
     parameter         FIRMWARE_FILE = "build/firmware.hex"
 ) (
     input             clk,     // Reloj del sistema a 100 MHz (Nexys A7 pin E3)
     input             resetn,  // Botón externo de reset activo bajo (CPU_RESETN)
-    output            trap,    // Indicador de trampa de la CPU (insn ilegal / desalineada -> LED15)
+    output            trap,    // Trampa de CPU o violación de acceso Harvard -> LED15
     output reg [14:0] leds,    // 15 LEDs de usuario mapeados en 0x1000_0000
     output            ser_tx,  // Línea TX UART hacia el puente USB-UART FTDI
     input             ser_rx   // Línea RX UART desde el puente USB-UART FTDI
@@ -35,13 +36,28 @@ module soc #(
   wire [ 3:0] mem_wstrb;
   wire [31:0] mem_rdata;
 
-  // Decodificador combinacional de direcciones: selecciona el esclavo en cuanto mem_valid sube
-  wire        ram_sel = mem_valid && ((mem_addr >> 2) < MEM_SIZE);  // 0x0000_0000 - 0x0000_3FFF
-  wire        leds_sel = mem_valid && (mem_addr == 32'h1000_0000);
-  wire        uart_div_sel = mem_valid && (mem_addr == 32'h2000_0004);
-  wire        uart_dat_sel = mem_valid && (mem_addr == 32'h2000_0008);
+  // Límites de direcciones en bytes para partición Harvard (IMEM seguida de DMEM)
+  localparam [31:0] IMEM_BYTES = IMEM_WORDS * 4;
+  localparam [31:0] DMEM_BASE  = IMEM_BYTES;
+  localparam [31:0] DMEM_END   = IMEM_BYTES + (DMEM_WORDS * 4);
 
-  // Núcleo PicoRV32 RV32I base (sin endurecimiento TMR)
+  // Decodificador combinacional Harvard:
+  // - IMEM: fetch de instrucciones (mem_instr=1) o lectura de constantes .rodata (wstrb=0)
+  // - DMEM: solo accesos de datos (mem_instr=0), lectura o escritura
+  wire imem_range = (mem_addr < IMEM_BYTES);
+  wire dmem_range = (mem_addr >= DMEM_BASE) && (mem_addr < DMEM_END);
+
+  wire imem_sel     = mem_valid && imem_range && !(|mem_wstrb);
+  wire dmem_sel     = mem_valid && dmem_range && !mem_instr;
+  // Detecta escritura sobre IMEM o ejecución desde DMEM (política W^X)
+  wire harv_err     = mem_valid && ((imem_range && (|mem_wstrb)) || (dmem_range && mem_instr));
+  wire leds_sel     = mem_valid && (mem_addr == 32'h1000_0000);
+  wire uart_div_sel = mem_valid && (mem_addr == 32'h2000_0004);
+  wire uart_dat_sel = mem_valid && (mem_addr == 32'h2000_0008);
+
+  // Núcleo PicoRV32 RV32I con endurecimiento TMR selectivo en PC y control
+  wire cpu_trap;
+
   picorv32 #(
       .ENABLE_COUNTERS     (1),
       .ENABLE_COUNTERS64   (0),
@@ -57,7 +73,7 @@ module soc #(
   ) cpu (
       .clk         (clk),
       .resetn      (sys_resetn),
-      .trap        (trap),
+      .trap        (cpu_trap),
       .mem_valid   (mem_valid),
       .mem_instr   (mem_instr),
       .mem_ready   (mem_ready),
@@ -82,21 +98,37 @@ module soc #(
       .eoi         ()
   );
 
-  // BRAM unificada de 16 KB (instrucciones, datos y pila)
-  // El direccionamiento por palabra usa mem_addr[13:2], descartando los bits de byte [1:0]
-  wire [31:0] ram_rdata;
+  // IMEM: 8 KB (instrucciones + .rodata), solo lectura desde el bus de la CPU
+  wire [31:0] imem_rdata;
 
   bram_sp #(
-      .WORDS    (MEM_SIZE),
-      .ADDR_BITS(12),
+      .WORDS    (IMEM_WORDS),
+      .ADDR_BITS(11),
+      .USE_INIT (1'b1),
       .INIT_FILE(FIRMWARE_FILE)
-  ) ram (
-      .clk(clk),
-      .en   (ram_sel && !mem_ready),  // Cualificado con !mem_ready para evitar doble acceso en el ciclo final
+  ) imem (
+      .clk  (clk),
+      .en   (imem_sel && !mem_ready),
+      .wstrb(4'b0000),
+      .addr (mem_addr[12:2]),
+      .wdata(32'h0),
+      .rdata(imem_rdata)
+  );
+
+  // DMEM: 8 KB (variables + pila), lectura/escritura sin precarga
+  wire [31:0] dmem_rdata;
+
+  bram_sp #(
+      .WORDS    (DMEM_WORDS),
+      .ADDR_BITS(11),
+      .USE_INIT (1'b0)
+  ) dmem (
+      .clk  (clk),
+      .en   (dmem_sel && !mem_ready),
       .wstrb(mem_wstrb),
-      .addr(mem_addr[13:2]),
+      .addr (mem_addr[12:2]),
       .wdata(mem_wdata),
-      .rdata(ram_rdata)
+      .rdata(dmem_rdata)
   );
 
   // Controlador UART (divisor a 115200 baudios configurado por firmware)
@@ -121,28 +153,45 @@ module soc #(
   );
 
   // Controlador síncrono de respuesta del bus y multiplexor de lectura
-  reg        ram_read_r;
+  reg        imem_read_r;   // 1 en el ciclo tras aceptar lectura de IMEM
+  reg        dmem_read_r;   // 1 en el ciclo tras aceptar lectura de DMEM
+  reg        harv_fault_r;  // Latch de violación W^X (se mantiene hasta reset)
   reg [31:0] mmio_rdata;
 
-  // Mux combinacional: entrega directamente la salida registrada de BRAM al completarse la lectura
-  assign mem_rdata = ram_read_r ? ram_rdata : mmio_rdata;
+  // LED15 se enciende ante trampa interna de CPU o violación Harvard
+  assign trap = cpu_trap | harv_fault_r;
+
+  // Mux combinacional: entrega la salida registrada de la BRAM correspondiente o MMIO
+  assign mem_rdata = imem_read_r ? imem_rdata :
+                     dmem_read_r ? dmem_rdata : mmio_rdata;
 
   always @(posedge clk) begin
     if (!sys_resetn) begin
-      mem_ready  <= 1'b0;
-      ram_read_r <= 1'b0;
-      mmio_rdata <= 32'h0;
-      leds       <= 15'h0;
+      mem_ready    <= 1'b0;
+      imem_read_r  <= 1'b0;
+      dmem_read_r  <= 1'b0;
+      harv_fault_r <= 1'b0;
+      mmio_rdata   <= 32'h0;
+      leds         <= 15'h0;
     end else begin
-      // Por defecto desactivados: mem_ready y ram_read_r son pulsos de 1 ciclo
-      mem_ready  <= 1'b0;
-      ram_read_r <= 1'b0;
+      // Por defecto desactivados: mem_ready e *_read_r son pulsos de 1 ciclo
+      mem_ready   <= 1'b0;
+      imem_read_r <= 1'b0;
+      dmem_read_r <= 1'b0;
 
       if (mem_valid && !mem_ready) begin
-        if (ram_sel) begin
-          // La BRAM captura addr/wdata en este flanco; el dato queda válido para la CPU en el ciclo siguiente
-          ram_read_r <= !(|mem_wstrb);
-          mem_ready  <= 1'b1;
+        if (imem_sel) begin
+          // IMEM captura addr en este flanco; el dato queda válido en el ciclo siguiente
+          imem_read_r <= 1'b1;
+          mem_ready   <= 1'b1;
+        end else if (dmem_sel) begin
+          // DMEM captura addr/wdata en este flanco; solo activa dmem_read_r si es lectura
+          dmem_read_r <= !(|mem_wstrb);
+          mem_ready   <= 1'b1;
+        end else if (harv_err) begin
+          // Cierra el ciclo de bus para no bloquear la CPU y dispara trap (LED15)
+          harv_fault_r <= 1'b1;
+          mem_ready    <= 1'b1;
         end else if (leds_sel) begin
           if (|mem_wstrb) leds <= mem_wdata[14:0];
           mmio_rdata <= {17'b0, leds};

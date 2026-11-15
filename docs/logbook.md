@@ -178,3 +178,46 @@ Incorporar **Verilator** (`--binary` con soporte `--timing`) en el [`Makefile`](
 ### Observaciones técnicas
 - **Simulador de 2 estados vs. 4 estados:** Verilator no modela `X` ni `Z` (inicializa los registros a `0` por defecto), por lo que puede ocultar fallos de *reset* o lecturas de memoria no inicializadas que `iverilog` (4 estados) y Vivado sí exponen. Se mantiene `iverilog` como referencia por defecto y Verilator para iteración rápida y futuras campañas largas de inyección de fallos SEU.
 - **Simulación monohilo (`1` hilo) frente a `--threads`:** aunque `-j 0` paraleliza la compilación C++ (`10` hilos), las pruebas con `--threads 4` (`5.386 s` *walltime* con `--trace`) y `--threads 10` (`3.289 s` *walltime* sin `--trace`) resultaron ~4–5× más lentas que en 1 hilo debido al sobrecoste de sincronización entre hilos en cada flanco de reloj sobre un SoC pequeño (~1114 LUTs / 703 FFs). Se mantiene la simulación monohilo salvo que el diseño escale significativamente en futuros hitos.
+
+---
+
+## [2026-11-15] — Separación de memoria Harvard: IMEM / DMEM (`feature/harvard-mem`)
+
+Primer paso preparatorio para el endurecimiento con ECC (basado en el análisis de HARV en `docs/harv_notes.md`): división de la BRAM unificada de 16 KB (`4096 × 32 bits`) en dos memorias independientes con separación estricta *Write XOR Execute* (`W^X`) por bus.
+
+### Arquitectura y cambios implementados
+- **Mapa de memoria Harvard en [`soc.v`](../rtl/top/soc.v):**
+  - **IMEM (`0x0000_0000 – 0x0000_1FFF`, 8 KB, 2048 palabras):** instanciación de `bram_sp` con `USE_INIT = 1'b1` (precarga de `firmware.hex`), puerto de escritura fijado en hardware a `wstrb = 4'b0000` y `wdata = 32'h0`. Admite *fetches* de instrucciones (`mem_instr == 1`) y lecturas de solo lectura (`!(|mem_wstrb)`) para acceder a `.rodata`/`.srodata` (cadenas UART).
+  - **DMEM (`0x0000_2000 – 0x0000_3FFF`, 8 KB, 2048 palabras):** instanciación de `bram_sp` con `USE_INIT = 1'b0` (sin carga inicial en síntesis/simulación, preparada para futura migración a IP ECC sin `.coe`). Acceso exclusivo a lectura/escritura de datos (`!mem_instr`).
+  - **Protección `W^X` (`harv_err` $\rightarrow$ `trap`):** cualquier escritura hacia IMEM o *fetch* de instrucción en DMEM activa `harv_err`, engancha `harv_fault_r` (conectado a `trap = cpu_trap | harv_fault_r`) y responde `mem_ready = 1` en el ciclo siguiente para evitar bloqueos del bus.
+- **[`bram_sp.v`](../rtl/mem/bram_sp.v):** incorporación del parámetro `parameter [0:0] USE_INIT = 1'b1` envolviendo el bloque `initial $readmemh(...)` dentro de `generate if (USE_INIT)`.
+- **Toolchain software ([`sections.ld`](../sw/boot/sections.ld), [`crt0.S`](../sw/boot/crt0.S), [`sw/Makefile`](../sw/Makefile), [`Makefile`](../Makefile)):**
+  - Definición explícita de regiones `IMEM (rx)` (`0x00000000`, 8K) y `DMEM (rw)` (`0x00002000`, 8K), con `.data : AT(_etext)` para copiar datos inicializados desde IMEM a DMEM en el arranque (`crt0.S`), inicialización de `.bss` a cero y `_estack = 0x00004000`.
+  - Parametrización completa de `APP` (`counter` por defecto) y `SIM_FAST`, ajustando `MEM_WORDS := 2048` en `makehex.py` (imagen de 8 KB).
+
+### Verificación funcional (`iverilog` / `verilator`)
+- `make lint` (`Verilator 5.054`): `0` errores y `0` *warnings* en 14 módulos RTL (`0.042 s`).
+- `make sim SIM_FAST=1 SIM=iverilog` y `make sim SIM_FAST=1 SIM=verilator`:
+  - Compilación del *firmware* `counter` (`text=684`, `data=0`, `bss=0`, binario `684 B` en `SIM_FAST=1`; `688 B` en `SIM_FAST=0`).
+  - Ejecución completa en ambos simuladores: *banner* UART, **7/7** inyecciones SEU superadas (`PC target=0/1/4` $\rightarrow$ `count_tmr_pc=3`; `CTRL target=0/2/4/6` $\rightarrow$ `count_tmr_ctrl=4`), 6 latidos (`Contador = 0..5`) y finalización limpia por *timeout* (`50 ms`) sin `trap`.
+  - Inspección de trazas en `build/dump.vcd`: conmutación correcta de `dmem_sel` en accesos a pila y `harv_err == 0` en toda la ejecución.
+
+### Resultados de síntesis y P&R (`openXC7` — `xc7a100tcsg324-1`)
+Flujo ejecutado con `make synth SYNTH=openxc7` (`Yosys 0.69` + `nextpnr-xilinx` + `fasm2frames` + `xc7frames2bit`) y validado físicamente en la placa **Digilent Nexys A7-100T**:
+
+| Recurso / Métrica | Unificada (baseline openXC7) | Harvard IMEM+DMEM | Delta |
+| :--- | :---: | :---: | :---: |
+| **Yosys Logic LUTs (LUT2–LUT6)** | `1767` | `1772` (`260 LUT2`, `370 LUT3`, `234 LUT4`, `620 LUT5`, `288 LUT6`) | `+5` |
+| **Post-route `SLICE_LUTX`** | `2671` | `2684 / 126800` (`2%`) | `+13` |
+| **Flip-Flops (`SLICE_FFX`)** | `918` | `921 / 126800` (`0%` — `907 FDRE`, `14 FDSE`) | `+3` |
+| **LUTRAM (`RAM32M` / `cpuregs`)** | `12` | `12` | `0` |
+| **Carry chains (`CARRY4`)** | `126` (Yosys) | `128` (Yosys) / `131 / 15850` (`nextpnr`, `0%`) | `+2` (Yosys) |
+| **Block RAM (`RAMB36E1`)** | `4` | `4 / 135` (`2%` — `2` IMEM + `2` DMEM) | `0` |
+| **Frecuencia máx. (`cpu.clk`)** | `135.96 MHz` | `131.58 MHz` (`PASS` @ `100.00 MHz`) | `-4.38 MHz` |
+| **Camino crítico** | — | `7.60 ns` (`2.28 ns` lógica + `5.32 ns` ruta) | — |
+
+### Observaciones técnicas
+- **Cero sobrecoste en BRAM (`4 RAMB36E1`):** dividir la memoria de `4096 × 32b` en dos bancos independientes de `2048 × 32b` mantiene el mismo consumo exacto de bloques físicos (`imem.mem.0.0/0.1` inicializadas y `dmem.mem.0.0/0.1` sin inicializar), ya que cada `RAMB36E1` en profundidad `2048` opera con ancho nativo de hasta 18 bits (`2 × 2048 × 16b` útiles por banco).
+- **Sobrecoste mínimo en lógica:** los `+3` flip-flops adicionales corresponden exactamente a los registros de decodificación de respuesta (`imem_read_r`, `dmem_read_r`) y al *latch* de fallo Harvard (`harv_fault_r`).
+- **Camino crítico:** continúa acotado dentro de PicoRV32 (`cpu.latched_branch` $\rightarrow$ `next_reg_next_pc[31:0][26]`) con `2.40 ns` de *slack* positivo frente al requisito de `10.00 ns` (`100 MHz`).
+- **Nota pendiente (Fase 2 ECC):** los comentarios iniciales de [`bram_sp.v`](../rtl/mem/bram_sp.v) todavía mencionan `16 KB (4096 palabras)`; conviene actualizarlos al introducir el controlador ECC de memoria.
