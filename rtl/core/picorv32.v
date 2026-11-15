@@ -179,9 +179,9 @@ module picorv32 #(
 	// Contadores para fallos TMR en PC y control
 	reg [31:0] count_tmr_pc, count_tmr_ctrl;
 
-	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify
-	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
-	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_next_pc_r0, reg_next_pc_r1, reg_next_pc_r2;
+	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify/Yosys
+	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
+	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [31:0] reg_next_pc_r0, reg_next_pc_r1, reg_next_pc_r2;
 
 	// Salidas votadas (cables hacia la CPU), borradores de próximo estado y evento de fallo
 	wire [31:0] reg_pc;
@@ -395,8 +395,8 @@ module picorv32 #(
 	// Memory Interface
 
 	// reg [1:0] mem_state;
-	// Tres replicas fisica de la FSM de memoria protegidas frente a fusión en Vivado/Synplify
-	(* dont_touch = "true", syn_preserve = 1 *) reg [1:0] mem_state_r0, mem_state_r1, mem_state_r2;
+	// Tres replicas fisica de la FSM de memoria protegidas frente a fusión en Vivado/Synplify/Yosys
+	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [1:0] mem_state_r0, mem_state_r1, mem_state_r2;
 
 	wire [1:0] mem_state;
 	reg [1:0] next_mem_state;
@@ -1265,8 +1265,8 @@ module picorv32 #(
 	localparam cpu_state_ldmem  = 8'b00000001;
 
 	// reg [7:0] cpu_state;
-	// Tres réplicas de la FSM principal
-	(* dont_touch = "true", syn_preserve = 1 *) reg [7:0] cpu_state_r0, cpu_state_r1, cpu_state_r2;
+	// Tres réplicas de la FSM principal protegidas frente a fusión en Vivado/Synplify/Yosys
+	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [7:0] cpu_state_r0, cpu_state_r1, cpu_state_r2;
 	
 	wire [7:0] cpu_state;
 	reg  [7:0] next_cpu_state;
@@ -1316,7 +1316,7 @@ module picorv32 #(
 	reg latched_is_lh;
 	reg latched_is_lb;
 	// Tres réplicas de rd destino (evita corrupción silenciosa de registros en writeback)
-	(* dont_touch = "true", syn_preserve = 1 *) reg [regindex_bits-1:0] latched_rd_r0, latched_rd_r1, latched_rd_r2;
+	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [regindex_bits-1:0] latched_rd_r0, latched_rd_r1, latched_rd_r2;
 
 	wire [regindex_bits-1:0] latched_rd;
 	reg  [regindex_bits-1:0] next_latched_rd;

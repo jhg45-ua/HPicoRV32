@@ -81,8 +81,9 @@ synth: sw $(CHIPDB_BIN)
 	fi
 	@mkdir -p $(OPENXC7_DIR)
 	cp $(BUILD_DIR)/firmware.hex $(OPENXC7_DIR)/firmware.hex
+# Propaga 'keep' desde los registros TMR (* keep *) hacia sus celdas FF antes de opt_merge
 	cd $(OPENXC7_DIR) && yosys -l yosys.log -Q \
-		-p 'synth_xilinx -flatten -abc9 -arch xc7 -top soc; write_json soc.json' \
+		-p 'hierarchy -check -top soc; proc; setattr -set keep 1 a:keep %ci1 t:*dff* %i; synth_xilinx -flatten -abc9 -arch xc7 -top soc; write_json soc.json' \
 		$(abspath $(RTL_SRCS))
 	nextpnr-xilinx --chipdb $(CHIPDB_BIN) \
 		--xdc $(XDC_FILE) \
