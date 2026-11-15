@@ -13,6 +13,7 @@ TB          ?= tb/tb_soc.v
 PORT        ?= /dev/ttyUSB1
 APP         ?= counter
 FW          ?= counter
+# Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY en simulación
 SIM_FAST    ?= 0
 
 SYNTH       ?= vivado
@@ -28,19 +29,26 @@ else
 BIT_FILE := $(VIVADO_DIR)/shrv32.bit
 endif
 
+SIM         ?= iverilog
+TRACE       ?= 1
+TB_TOP      ?= $(basename $(notdir $(TB)))
+VLT_WARN_FLAGS := -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY \
+	-Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED -Wno-PROCASSINIT \
+	-Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-SYNCASYNCNET
+
 .PHONY: help sw upload sim wave lint synth vivado-gui prog clean
 
 help:
 	@echo "Comandos disponibles en SHRV32:"
-	@echo "  make sw [FW=counter|boot] -> Compila bootloader + app y genera build/firmware.hex"
-	@echo "  make upload [PORT=...]    -> Sube build/$(APP).bin al bootloader vía UART"
-	@echo "  make sim [TB=...]         -> Compila firmware y simula con iverilog"
-	@echo "  make wave                 -> Abre build/dump.vcd en Surfer"
-	@echo "  make lint                 -> Comprueba sintaxis y reglas RTL con Verilator"
-	@echo "  make synth [SYNTH=vivado|openxc7] -> Síntesis, P&R y bitstream"
-	@echo "  make vivado-gui           -> Genera el .xpr y abre la interfaz gráfica de Vivado"
-	@echo "  make prog [SYNTH=vivado|openxc7]  -> Programa la Nexys A7 usando openFPGALoader"
-	@echo "  make clean                -> Elimina la carpeta build/"
+	@echo "  make sw [FW=counter|boot]                              -> Compila bootloader + app y genera build/firmware.hex"
+	@echo "  make upload [PORT=...]                                 -> Sube build/$(APP).bin al bootloader vía UART"
+	@echo "  make sim [TB=...] [SIM=iverilog|verilator] [TRACE=1|0] -> Simula RTL"
+	@echo "  make wave                                              -> Abre build/dump.vcd en Surfer"
+	@echo "  make lint                                              -> Comprueba sintaxis y reglas RTL con Verilator"
+	@echo "  make synth [SYNTH=vivado|openxc7]                      -> Síntesis, P&R y bitstream"
+	@echo "  make vivado-gui                                        -> Genera el .xpr y abre la interfaz gráfica de Vivado"
+	@echo "  make prog [SYNTH=vivado|openxc7]                       -> Programa la Nexys A7 usando openFPGALoader"
+	@echo "  make clean                                             -> Elimina la carpeta build/"
 
 sw:
 	@mkdir -p $(BUILD_DIR)
@@ -51,16 +59,22 @@ upload: sw
 
 sim: sw
 	@mkdir -p $(BUILD_DIR)
+ifeq ($(SIM), verilator)
+	verilator --binary $(if $(filter 1,$(TRACE)),--trace,) -j 0 $(VLT_WARN_FLAGS) \
+		--Mdir $(BUILD_DIR)/vlt_$(TB_TOP) --top-module $(TB_TOP) $(TB) $(RTL_SRCS)
+	./$(BUILD_DIR)/vlt_$(TB_TOP)/V$(TB_TOP)
+else ifeq ($(SIM), iverilog)
 	iverilog -g2001 -o $(BUILD_DIR)/sim.out $(TB) $(RTL_SRCS)
 	vvp $(BUILD_DIR)/sim.out
+else
+	$(error Simulador no soportado: '$(SIM)'. Usa SIM=iverilog o SIM=verilator)
+endif
 
 wave:
 	surfer $(BUILD_DIR)/dump.vcd &
 
 lint:
-	verilator --lint-only -Wall -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY \
-		-Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED -Wno-PROCASSINIT -Wno-WIDTHTRUNC \
-		-Wno-WIDTHEXPAND -Wno-SYNCASYNCNET --top-module soc $(RTL_SRCS)
+	verilator --lint-only -Wall $(VLT_WARN_FLAGS) --top-module soc $(RTL_SRCS)
 
 $(CHIPDB_BIN):
 	@if [ -z "$$NEXTPNR_XILINX_DIR" ] || [ -z "$$PRJXRAY_DB_DIR" ]; then \
