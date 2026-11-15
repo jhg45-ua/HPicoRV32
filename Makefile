@@ -10,9 +10,7 @@ XDC_FILE    := $(TCL_DIR)/Nexys-A7-100T-Master.xdc
 
 RTL_SRCS    := $(wildcard rtl/core/*.v rtl/mem/*.v rtl/periph/*.v rtl/top/*.v)
 TB          ?= tb/tb_soc.v
-PORT        ?= /dev/ttyUSB1
 APP         ?= counter
-FW          ?= counter
 # Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY en simulación
 SIM_FAST    ?= 0
 
@@ -36,13 +34,12 @@ VLT_WARN_FLAGS := -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMP
 	-Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED -Wno-PROCASSINIT \
 	-Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-SYNCASYNCNET
 
-.PHONY: help sw upload sim wave lint synth vivado-gui prog clean
+.PHONY: help sw sim wave lint synth vivado-gui prog clean
 
 help:
 	@echo "Comandos disponibles en SHRV32:"
-	@echo "  make sw [FW=counter|boot]                              -> Compila bootloader + app y genera build/firmware.hex"
-	@echo "  make upload [PORT=...]                                 -> Sube build/$(APP).bin al bootloader vía UART"
-	@echo "  make sim [TB=...] [SIM=iverilog|verilator] [TRACE=1|0] -> Simula RTL"
+	@echo "  make sw [APP=counter] [SIM_FAST=1|0]                   -> Compila sw/apps/<APP> y genera build/firmware.hex"
+	@echo "  make sim [TB=...] [APP=...] [SIM=iverilog|verilator] [TRACE=1|0] -> Compila firmware y simula RTL"
 	@echo "  make wave                                              -> Abre build/dump.vcd en Surfer"
 	@echo "  make lint                                              -> Comprueba sintaxis y reglas RTL con Verilator"
 	@echo "  make synth [SYNTH=vivado|openxc7]                      -> Síntesis, P&R y bitstream"
@@ -52,10 +49,7 @@ help:
 
 sw:
 	@mkdir -p $(BUILD_DIR)
-	$(MAKE) -C sw FW=$(FW) SIM_FAST=$(SIM_FAST)
-
-upload: sw
-	python3 sw/common/upload.py $(BUILD_DIR)/$(APP).bin $(PORT)
+	$(MAKE) -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
 
 sim: sw
 	@mkdir -p $(BUILD_DIR)
