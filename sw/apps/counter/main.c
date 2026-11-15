@@ -23,6 +23,10 @@ void main(void) {
             puts("[SHRV32 Latido] Contador = ");
             char hex_char = "0123456789ABCDEF"[(counter >> 4) & 0x0F];
             putc(hex_char);
+            puts(" | PC=");
+            puthex(tmr_read_pc_err());
+            puts(" CTRL=");
+            puthex(tmr_read_ctrl_err());
             puts("\r\n");
         }
 

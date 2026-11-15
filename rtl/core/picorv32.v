@@ -176,6 +176,9 @@ module picorv32 #(
 	reg [63:0] count_cycle, count_instr;
 	reg [31:0] reg_op1, reg_op2, reg_out;
 
+	// Contadores para fallos TMR en PC y control
+	reg [31:0] count_tmr_pc, count_tmr_ctrl;
+
 	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify
 	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
 	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_next_pc_r0, reg_next_pc_r1, reg_next_pc_r2;
@@ -725,7 +728,7 @@ module picorv32 #(
 	reg instr_lb, instr_lh, instr_lw, instr_lbu, instr_lhu, instr_sb, instr_sh, instr_sw;
 	reg instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai;
 	reg instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and;
-	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence;
+	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence, instr_rdtmr_pc, instr_rdtmr_ctrl;
 	reg instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer;
 	wire instr_trap;
 
@@ -759,9 +762,11 @@ module picorv32 #(
 			instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai,
 			instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and,
 			instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_fence,
-			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer};
+			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer, instr_rdtmr_pc, instr_rdtmr_ctrl};
 
 	wire is_rdcycle_rdcycleh_rdinstr_rdinstrh;
+	// CSRs custom de solo lectura (0xCC0/0xCC1) para telemetría de fallos TMR
+	wire is_rdtmr = instr_rdtmr_pc || instr_rdtmr_ctrl;
 	assign is_rdcycle_rdcycleh_rdinstr_rdinstrh = |{instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh};
 
 	reg [63:0] new_ascii_instr;
@@ -1159,6 +1164,9 @@ module picorv32 #(
 			                   (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000000100000010)) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
 			instr_rdinstr  <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11000000001000000010) && ENABLE_COUNTERS;
 			instr_rdinstrh <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000001000000010) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
+			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010
+			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010}) && ENABLE_TMR;
+			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010}) && ENABLE_TMR;
 
 			instr_ecall_ebreak <= ((mem_rdata_q[6:0] == 7'b1110011 && !mem_rdata_q[31:21] && !mem_rdata_q[19:7]) ||
 					(COMPRESSED_ISA && mem_rdata_q[15:0] == 16'h9002));
@@ -1240,7 +1248,7 @@ module picorv32 #(
 			instr_and   <= 0;
 
 			instr_fence <= 0;
-			decoded_rd <= 0;
+			decoded_rd <= 0; // Evita X inicial en latched_rd y en su votador tras reset
 		end
 	end
 
@@ -1307,7 +1315,7 @@ module picorv32 #(
 	reg latched_is_lu;
 	reg latched_is_lh;
 	reg latched_is_lb;
-	// reg [regindex_bits-1:0] latched_rd;
+	// Tres réplicas de rd destino (evita corrupción silenciosa de registros en writeback)
 	(* dont_touch = "true", syn_preserve = 1 *) reg [regindex_bits-1:0] latched_rd_r0, latched_rd_r1, latched_rd_r2;
 
 	wire [regindex_bits-1:0] latched_rd;
@@ -1566,6 +1574,15 @@ module picorv32 #(
 			count_instr <= 'bx;
 		end
 
+		// Muestrea los pulsos de fallo antes de que el self-healing repare los FFs en este flanco
+		if (!resetn) begin
+			count_tmr_pc   <= 0;
+			count_tmr_ctrl <= 0;
+		end else if (ENABLE_TMR) begin
+			if (tmr_pc_err)   count_tmr_pc   <= count_tmr_pc + 1;
+			if (tmr_ctrl_err) count_tmr_ctrl <= count_tmr_ctrl + 1;
+		end
+
 		next_irq_pending = ENABLE_IRQ ? irq_pending & LATCHED_IRQ : 'bx;
 
 		if (ENABLE_IRQ && ENABLE_IRQ_TIMER && timer) begin
@@ -1766,6 +1783,13 @@ module picorv32 #(
 							instr_rdinstrh && ENABLE_COUNTERS64:
 								reg_out <= count_instr[63:32];
 						endcase
+						latched_store <= 1;
+						next_cpu_state = cpu_state_fetch;
+					end
+					
+					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1)
+					ENABLE_TMR && is_rdtmr: begin
+						reg_out <= instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl;
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
