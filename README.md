@@ -22,7 +22,7 @@ El procesador está concebido como núcleo de control dentro de una IP acelerado
 ```text
 shrv32/
 ├── AGENTS.md          # Contexto técnico, guía de Verilog y reglas de flujo
-├── Makefile           # Flujo unificado de simulación, firmware y Vivado
+├── Makefile           # Flujo unificado de simulación, firmware, Vivado y openXC7
 ├── external/          # Submódulos Git de solo lectura (picorv32 y harv)
 ├── rtl/               # RTL Verilog sintetizable (core, mem, periph, top)
 ├── tb/                # Bancos de pruebas e inyección de fallos XOR
@@ -51,14 +51,14 @@ cd shrv32
 | `make sim` | Compila el firmware y ejecuta la simulación RTL con **Icarus Verilog** (`iverilog` + `vvp`) |
 | `make wave` | Abre las formas de onda generadas (`build/dump.vcd`) en **Surfer** |
 | `make lint` | Comprueba sintaxis y reglas de diseño RTL con **Verilator** |
-| `make synth` | Ejecuta síntesis, implementación y bitstream en **Vivado** (modo batch) |
+| `make synth` | Ejecuta síntesis, P&R y *bitstream* con **Vivado** (`SYNTH=vivado`) o **openXC7** (`SYNTH=openxc7`) |
 | `make vivado-gui` | Genera el proyecto `.xpr` en `build/vivado/` y abre la GUI de Vivado |
-| `make prog` | Programa la placa Nexys A7-100T mediante `openFPGALoader` |
+| `make prog` | Programa la placa Nexys A7-100T mediante `openFPGALoader -b nexys_a7_100` (usa `SYNTH` para elegir el `.bit`) |
 | `make clean` | Elimina todos los artefactos generados dentro de `build/` |
 
 ### 3. Opciones y *flags* del `Makefile`
 
-Puedes pasar estas variables al invocar `make` (por ejemplo: `make sim SIM_FAST=1` o `make sw FW=boot`):
+Puedes pasar estas variables al invocar `make` (por ejemplo: `make sim SIM_FAST=1`, `make sw FW=boot` o `make synth SYNTH=openxc7`):
 
 | Variable | Por defecto | Para qué sirve |
 | --- | --- | --- |
@@ -68,6 +68,20 @@ Puedes pasar estas variables al invocar `make` (por ejemplo: `make sim SIM_FAST=
 | `APP` | `counter` | Nombre del binario `build/$(APP).bin` que sube `make upload`. |
 | `PORT` | `/dev/ttyUSB1` | Puerto serie USB-UART de la Nexys A7 para `make upload` (en macOS suele ser `/dev/cu.usbserial-*`). |
 | `TOOLCHAIN` | `riscv64-unknown-elf-` | Prefijo del compilador cruzado RISC-V en `sw/Makefile`. |
+| `SYNTH` | `vivado` | *Backend* de implementación y *bitstream*: `vivado` genera `build/vivado/shrv32.bit`; `openxc7` usa `yosys` + `nextpnr-xilinx` + `fasm2frames` + `xc7frames2bit` y genera `build/openxc7/shrv32.bit`. |
+| `CHIPDB_DIR` | `$(HOME)/.cache/openxc7` | Directorio de caché para `chipdb-xc7a100tcsg324-1.bin` en el flujo `SYNTH=openxc7`. |
+
+### 4. Flujo de síntesis Open Source (`SYNTH=openxc7`)
+
+Pensado para generar y programar el *bitstream* nativamente en macOS/Linux sin depender de Vivado (la primera ejecución compila y cachea `chipdb-xc7a100tcsg324-1.bin` en `CHIPDB_DIR`):
+
+```bash
+source /opt/openxc7/export.sh
+make synth SYNTH=openxc7
+make prog SYNTH=openxc7
+```
+
+*(Requiere tener instalado **openXC7** en `/opt/openxc7`, con `NEXTPNR_XILINX_DIR` y `PRJXRAY_DB_DIR` exportados al cargar `export.sh`.)*
 
 ---
 
