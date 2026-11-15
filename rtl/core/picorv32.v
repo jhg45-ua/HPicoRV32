@@ -85,7 +85,8 @@ module picorv32 #(
 	parameter [31:0] LATCHED_IRQ = 32'h ffff_ffff,
 	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000,
 	parameter [31:0] PROGADDR_IRQ = 32'h 0000_0010,
-	parameter [31:0] STACKADDR = 32'h ffff_ffff
+	parameter [31:0] STACKADDR = 32'h ffff_ffff,
+	parameter [ 0:0] ENABLE_TMR = 1
 ) (
 	input clk, resetn,
 	output reg trap,
@@ -173,7 +174,52 @@ module picorv32 #(
 	localparam [35:0] TRACE_IRQ    = {4'b 1000, 32'b 0};
 
 	reg [63:0] count_cycle, count_instr;
-	reg [31:0] reg_pc, reg_next_pc, reg_op1, reg_op2, reg_out;
+	reg [31:0] reg_op1, reg_op2, reg_out;
+
+	// Contadores para fallos TMR en PC y control
+	reg [31:0] count_tmr_pc, count_tmr_ctrl;
+
+	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify
+	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
+	(* dont_touch = "true", syn_preserve = 1 *) reg [31:0] reg_next_pc_r0, reg_next_pc_r1, reg_next_pc_r2;
+
+	// Salidas votadas (cables hacia la CPU), borradores de próximo estado y evento de fallo
+	wire [31:0] reg_pc;
+	wire [31:0] reg_next_pc;
+	reg  [31:0] next_reg_pc;
+	reg  [31:0] next_reg_next_pc;
+	wire        tmr_pc_err;
+
+	// Instancia los votadores 2-de-3 en síntesis si ENABLE_TMR=1; en caso contrario pasa r0 directo
+	generate
+		if (ENABLE_TMR) begin : gen_tmr_pc
+			wire reg_pc_err;
+			wire reg_next_pc_err;
+
+			tmr_voter #(.WIDTH(32)) u_voter_pc (
+				.r0   (reg_pc_r0),
+				.r1   (reg_pc_r1),
+				.r2   (reg_pc_r2),
+				.voted(reg_pc),
+				.err  (reg_pc_err)
+			);
+
+			tmr_voter #(.WIDTH(32)) u_voter_next_pc (
+				.r0   (reg_next_pc_r0),
+				.r1   (reg_next_pc_r1),
+				.r2   (reg_next_pc_r2),
+				.voted(reg_next_pc),
+				.err  (reg_next_pc_err)
+			);
+
+			assign tmr_pc_err = reg_pc_err | reg_next_pc_err;
+		end else begin : gen_no_tmr_pc
+			assign reg_pc      = reg_pc_r0;
+			assign reg_next_pc = reg_next_pc_r0;
+			assign tmr_pc_err  = 1'b0;
+		end
+	endgenerate
+
 	reg [4:0] reg_sh;
 
 	reg [31:0] next_insn_opcode;
@@ -348,7 +394,29 @@ module picorv32 #(
 
 	// Memory Interface
 
-	reg [1:0] mem_state;
+	// reg [1:0] mem_state;
+	// Tres replicas fisica de la FSM de memoria protegidas frente a fusión en Vivado/Synplify
+	(* dont_touch = "true", syn_preserve = 1 *) reg [1:0] mem_state_r0, mem_state_r1, mem_state_r2;
+
+	wire [1:0] mem_state;
+	reg [1:0] next_mem_state;
+	wire mem_state_err;
+
+	generate
+		if (ENABLE_TMR) begin : gen_tmr_mem_state
+			tmr_voter #(.WIDTH(2)) u_voter_mem_state (
+				.r0   (mem_state_r0),
+				.r1   (mem_state_r1),
+				.r2   (mem_state_r2),
+				.voted(mem_state),
+				.err  (mem_state_err)
+			);
+		end else begin : gen_no_tmr_mem_state
+			assign mem_state = mem_state_r0;
+			assign mem_state_err = 1'b0;
+		end
+	endgenerate
+	
 	reg [1:0] mem_wordsize;
 	reg [31:0] mem_rdata_word;
 	reg [31:0] mem_rdata_q;
@@ -563,9 +631,12 @@ module picorv32 #(
 	end
 
 	always @(posedge clk) begin
+		// Self-healing: recarga el estado votado si la FSM no transiciona este ciclo
+		next_mem_state = mem_state;
+
 		if (!resetn || trap) begin
 			if (!resetn)
-				mem_state <= 0;
+				next_mem_state = 0;
 			if (!resetn || mem_ready)
 				mem_valid <= 0;
 			mem_la_secondword <= 0;
@@ -584,12 +655,12 @@ module picorv32 #(
 						mem_valid <= !mem_la_use_prefetched_high_word;
 						mem_instr <= mem_do_prefetch || mem_do_rinst;
 						mem_wstrb <= 0;
-						mem_state <= 1;
+						next_mem_state = 1;
 					end
 					if (mem_do_wdata) begin
 						mem_valid <= 1;
 						mem_instr <= 0;
-						mem_state <= 2;
+						next_mem_state = 2;
 					end
 				end
 				1: begin
@@ -614,7 +685,7 @@ module picorv32 #(
 									prefetched_high_word <= 0;
 								end
 							end
-							mem_state <= mem_do_rinst || mem_do_rdata ? 0 : 3;
+							next_mem_state = mem_do_rinst || mem_do_rdata ? 0 : 3;
 						end
 					end
 				end
@@ -623,14 +694,14 @@ module picorv32 #(
 					`assert(mem_do_wdata);
 					if (mem_xfer) begin
 						mem_valid <= 0;
-						mem_state <= 0;
+						next_mem_state = 0;
 					end
 				end
 				3: begin
 					`assert(mem_wstrb == 0);
 					`assert(mem_do_prefetch);
 					if (mem_do_rinst) begin
-						mem_state <= 0;
+						next_mem_state = 0;
 					end
 				end
 			endcase
@@ -638,6 +709,15 @@ module picorv32 #(
 
 		if (clear_prefetched_high_word)
 			prefetched_high_word <= 0;
+
+		// Captura el próximo estado de memoria en las 3 réplicas (o solo r0 si ENABLE_TMR=0)
+		if (ENABLE_TMR) begin
+			mem_state_r0 <= next_mem_state;
+			mem_state_r1 <= next_mem_state;
+			mem_state_r2 <= next_mem_state;
+		end else begin
+			mem_state_r0 <= next_mem_state;
+		end
 	end
 
 
@@ -648,7 +728,7 @@ module picorv32 #(
 	reg instr_lb, instr_lh, instr_lw, instr_lbu, instr_lhu, instr_sb, instr_sh, instr_sw;
 	reg instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai;
 	reg instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and;
-	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence;
+	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence, instr_rdtmr_pc, instr_rdtmr_ctrl;
 	reg instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer;
 	wire instr_trap;
 
@@ -682,9 +762,11 @@ module picorv32 #(
 			instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai,
 			instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and,
 			instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_fence,
-			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer};
+			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer, instr_rdtmr_pc, instr_rdtmr_ctrl};
 
 	wire is_rdcycle_rdcycleh_rdinstr_rdinstrh;
+	// CSRs custom de solo lectura (0xCC0/0xCC1) para telemetría de fallos TMR
+	wire is_rdtmr = instr_rdtmr_pc || instr_rdtmr_ctrl;
 	assign is_rdcycle_rdcycleh_rdinstr_rdinstrh = |{instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh};
 
 	reg [63:0] new_ascii_instr;
@@ -1082,6 +1164,9 @@ module picorv32 #(
 			                   (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000000100000010)) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
 			instr_rdinstr  <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11000000001000000010) && ENABLE_COUNTERS;
 			instr_rdinstrh <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000001000000010) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
+			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010
+			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010}) && ENABLE_TMR;
+			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010}) && ENABLE_TMR;
 
 			instr_ecall_ebreak <= ((mem_rdata_q[6:0] == 7'b1110011 && !mem_rdata_q[31:21] && !mem_rdata_q[19:7]) ||
 					(COMPRESSED_ISA && mem_rdata_q[15:0] == 16'h9002));
@@ -1163,6 +1248,7 @@ module picorv32 #(
 			instr_and   <= 0;
 
 			instr_fence <= 0;
+			decoded_rd <= 0; // Evita X inicial en latched_rd y en su votador tras reset
 		end
 	end
 
@@ -1178,7 +1264,29 @@ module picorv32 #(
 	localparam cpu_state_stmem  = 8'b00000010;
 	localparam cpu_state_ldmem  = 8'b00000001;
 
-	reg [7:0] cpu_state;
+	// reg [7:0] cpu_state;
+	// Tres réplicas de la FSM principal
+	(* dont_touch = "true", syn_preserve = 1 *) reg [7:0] cpu_state_r0, cpu_state_r1, cpu_state_r2;
+	
+	wire [7:0] cpu_state;
+	reg  [7:0] next_cpu_state;
+	wire       cpu_state_err;
+	
+	generate
+		if (ENABLE_TMR) begin : gen_tmr_cpu_state
+			tmr_voter #(.WIDTH(8)) u_voter_cpu_state (
+				.r0   (cpu_state_r0),
+				.r1   (cpu_state_r1),
+				.r2   (cpu_state_r2),
+				.voted(cpu_state),
+				.err  (cpu_state_err)
+			);
+		end else begin : gen_no_tmr_cpu_state
+			assign cpu_state     = cpu_state_r0;
+			assign cpu_state_err = 1'b0;
+		end
+	endgenerate
+	
 	reg [1:0] irq_state;
 
 	`FORMAL_KEEP reg [127:0] dbg_ascii_state;
@@ -1207,7 +1315,30 @@ module picorv32 #(
 	reg latched_is_lu;
 	reg latched_is_lh;
 	reg latched_is_lb;
-	reg [regindex_bits-1:0] latched_rd;
+	// Tres réplicas de rd destino (evita corrupción silenciosa de registros en writeback)
+	(* dont_touch = "true", syn_preserve = 1 *) reg [regindex_bits-1:0] latched_rd_r0, latched_rd_r1, latched_rd_r2;
+
+	wire [regindex_bits-1:0] latched_rd;
+	reg  [regindex_bits-1:0] next_latched_rd;
+	wire                     latched_rd_err;
+
+	generate
+		if (ENABLE_TMR) begin : gen_tmr_latched_rd
+			tmr_voter #(.WIDTH(regindex_bits)) u_voter_latched_rd (
+				.r0   (latched_rd_r0),
+				.r1   (latched_rd_r1),
+				.r2   (latched_rd_r2),
+				.voted(latched_rd),
+				.err  (latched_rd_err)
+			);
+		end else begin : gen_no_tmr_latched_rd
+			assign latched_rd     = latched_rd_r0;
+			assign latched_rd_err = 1'b0;
+		end
+	endgenerate
+
+	// Error agregado del dominio de control para telemetría CSR (Fase 4)
+	wire tmr_ctrl_err = cpu_state_err | mem_state_err | latched_rd_err;
 
 	reg [31:0] current_pc;
 	assign next_pc = latched_store && latched_branch ? reg_out & ~1 : reg_next_pc;
@@ -1400,6 +1531,12 @@ module picorv32 #(
 	assign launch_next_insn = cpu_state == cpu_state_fetch && decoder_trigger && (!ENABLE_IRQ || irq_delay || irq_active || !(irq_pending & ~irq_mask));
 
 	always @(posedge clk) begin
+		// Self-healing: por defecto recarga el valor votado para reparar cualquier SEU en 1 ciclo
+		next_reg_pc      = reg_pc;
+		next_reg_next_pc = reg_next_pc;
+		next_cpu_state   = cpu_state;
+		next_latched_rd  = latched_rd;
+
 		trap <= 0;
 		reg_sh <= 'bx;
 		reg_out <= 'bx;
@@ -1437,6 +1574,15 @@ module picorv32 #(
 			count_instr <= 'bx;
 		end
 
+		// Muestrea los pulsos de fallo antes de que el self-healing repare los FFs en este flanco
+		if (!resetn) begin
+			count_tmr_pc   <= 0;
+			count_tmr_ctrl <= 0;
+		end else if (ENABLE_TMR) begin
+			if (tmr_pc_err)   count_tmr_pc   <= count_tmr_pc + 1;
+			if (tmr_ctrl_err) count_tmr_ctrl <= count_tmr_ctrl + 1;
+		end
+
 		next_irq_pending = ENABLE_IRQ ? irq_pending & LATCHED_IRQ : 'bx;
 
 		if (ENABLE_IRQ && ENABLE_IRQ_TIMER && timer) begin
@@ -1455,8 +1601,9 @@ module picorv32 #(
 			trace_data <= 'bx;
 
 		if (!resetn) begin
-			reg_pc <= PROGADDR_RESET;
-			reg_next_pc <= PROGADDR_RESET;
+			// Inicializa PC y next_PC a la dirección de arranque tras reset
+			next_reg_pc = PROGADDR_RESET;
+			next_reg_next_pc = PROGADDR_RESET;
 			if (ENABLE_COUNTERS)
 				count_instr <= 0;
 			latched_store <= 0;
@@ -1475,12 +1622,13 @@ module picorv32 #(
 			irq_state <= 0;
 			eoi <= 0;
 			timer <= 0;
+			next_latched_rd = 0;
 			if (~STACKADDR) begin
 				latched_store <= 1;
-				latched_rd <= 2;
+				next_latched_rd = 2;
 				reg_out <= STACKADDR;
 			end
-			cpu_state <= cpu_state_fetch;
+			next_cpu_state = cpu_state_fetch;
 		end else
 		(* parallel_case, full_case *)
 		case (cpu_state)
@@ -1523,8 +1671,8 @@ module picorv32 #(
 						trace_data <= (irq_active ? TRACE_IRQ : 0) | (latched_stalu ? alu_out_q : reg_out);
 				end
 
-				reg_pc <= current_pc;
-				reg_next_pc <= current_pc;
+				next_reg_pc = current_pc;
+				next_reg_next_pc = current_pc;
 
 				latched_store <= 0;
 				latched_stalu <= 0;
@@ -1532,7 +1680,7 @@ module picorv32 #(
 				latched_is_lu <= 0;
 				latched_is_lh <= 0;
 				latched_is_lb <= 0;
-				latched_rd <= decoded_rd;
+				next_latched_rd = decoded_rd;
 				latched_compr <= compressed_instr;
 
 				if (ENABLE_IRQ && ((decoder_trigger && !irq_active && !irq_delay && |(irq_pending & ~irq_mask)) || irq_state)) begin
@@ -1541,15 +1689,15 @@ module picorv32 #(
 						irq_state == 2'b01 ? 2'b10 : 2'b00;
 					latched_compr <= latched_compr;
 					if (ENABLE_IRQ_QREGS)
-						latched_rd <= irqregs_offset | irq_state[0];
+						next_latched_rd = irqregs_offset | irq_state[0];
 					else
-						latched_rd <= irq_state[0] ? 4 : 3;
+						next_latched_rd = irq_state[0] ? 4 : 3;
 				end else
 				if (ENABLE_IRQ && (decoder_trigger || do_waitirq) && instr_waitirq) begin
 					if (irq_pending) begin
 						latched_store <= 1;
 						reg_out <= irq_pending;
-						reg_next_pc <= current_pc + (compressed_instr ? 2 : 4);
+						next_reg_next_pc = current_pc + (compressed_instr ? 2 : 4);
 						mem_do_rinst <= 1;
 					end else
 						do_waitirq <= 1;
@@ -1557,7 +1705,7 @@ module picorv32 #(
 				if (decoder_trigger) begin
 					`debug($display("-- %-0t", $time);)
 					irq_delay <= irq_active;
-					reg_next_pc <= current_pc + (compressed_instr ? 2 : 4);
+					next_reg_next_pc = current_pc + (compressed_instr ? 2 : 4);
 					if (ENABLE_TRACE)
 						latched_trace <= 1;
 					if (ENABLE_COUNTERS) begin
@@ -1566,12 +1714,12 @@ module picorv32 #(
 					end
 					if (instr_jal) begin
 						mem_do_rinst <= 1;
-						reg_next_pc <= current_pc + decoded_imm_j;
+						next_reg_next_pc = current_pc + decoded_imm_j;
 						latched_branch <= 1;
 					end else begin
 						mem_do_rinst <= 0;
 						mem_do_prefetch <= !instr_jalr && !instr_retirq;
-						cpu_state <= cpu_state_ld_rs1;
+						next_cpu_state = cpu_state_ld_rs1;
 					end
 				end
 			end
@@ -1600,27 +1748,27 @@ module picorv32 #(
 									pcpi_valid <= 0;
 									reg_out <= pcpi_int_rd;
 									latched_store <= pcpi_int_wr;
-									cpu_state <= cpu_state_fetch;
+									next_cpu_state = cpu_state_fetch;
 								end else
 								if (CATCH_ILLINSN && (pcpi_timeout || instr_ecall_ebreak)) begin
 									pcpi_valid <= 0;
 									`debug($display("EBREAK OR UNSUPPORTED INSN AT 0x%08x", reg_pc);)
 									if (ENABLE_IRQ && !irq_mask[irq_ebreak] && !irq_active) begin
 										next_irq_pending[irq_ebreak] = 1;
-										cpu_state <= cpu_state_fetch;
+										next_cpu_state = cpu_state_fetch;
 									end else
-										cpu_state <= cpu_state_trap;
+										next_cpu_state = cpu_state_trap;
 								end
 							end else begin
-								cpu_state <= cpu_state_ld_rs2;
+								next_cpu_state = cpu_state_ld_rs2;
 							end
 						end else begin
 							`debug($display("EBREAK OR UNSUPPORTED INSN AT 0x%08x", reg_pc);)
 							if (ENABLE_IRQ && !irq_mask[irq_ebreak] && !irq_active) begin
 								next_irq_pending[irq_ebreak] = 1;
-								cpu_state <= cpu_state_fetch;
+								next_cpu_state = cpu_state_fetch;
 							end else
-								cpu_state <= cpu_state_trap;
+								next_cpu_state = cpu_state_trap;
 						end
 					end
 					ENABLE_COUNTERS && is_rdcycle_rdcycleh_rdinstr_rdinstrh: begin
@@ -1636,7 +1784,14 @@ module picorv32 #(
 								reg_out <= count_instr[63:32];
 						endcase
 						latched_store <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
+					end
+					
+					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1)
+					ENABLE_TMR && is_rdtmr: begin
+						reg_out <= instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl;
+						latched_store <= 1;
+						next_cpu_state = cpu_state_fetch;
 					end
 					is_lui_auipc_jal: begin
 						reg_op1 <= instr_lui ? 0 : reg_pc;
@@ -1645,7 +1800,7 @@ module picorv32 #(
 							alu_wait <= 1;
 						else
 							mem_do_rinst <= mem_do_prefetch;
-						cpu_state <= cpu_state_exec;
+						next_cpu_state = cpu_state_exec;
 					end
 					ENABLE_IRQ && ENABLE_IRQ_QREGS && instr_getq: begin
 						`debug($display("LD_RS1: %2d 0x%08x", decoded_rs1, cpuregs_rs1);)
@@ -1653,16 +1808,16 @@ module picorv32 #(
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
 						latched_store <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 					ENABLE_IRQ && ENABLE_IRQ_QREGS && instr_setq: begin
 						`debug($display("LD_RS1: %2d 0x%08x", decoded_rs1, cpuregs_rs1);)
 						reg_out <= cpuregs_rs1;
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
-						latched_rd <= latched_rd | irqregs_offset;
+						next_latched_rd = latched_rd | irqregs_offset;
 						latched_store <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 					ENABLE_IRQ && instr_retirq: begin
 						eoi <= 0;
@@ -1673,7 +1828,7 @@ module picorv32 #(
 						reg_out <= CATCH_MISALIGN ? (cpuregs_rs1 & 32'h fffffffe) : cpuregs_rs1;
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 					ENABLE_IRQ && instr_maskirq: begin
 						latched_store <= 1;
@@ -1682,7 +1837,7 @@ module picorv32 #(
 						irq_mask <= cpuregs_rs1 | MASKED_IRQ;
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 					ENABLE_IRQ && ENABLE_IRQ_TIMER && instr_timer: begin
 						latched_store <= 1;
@@ -1691,14 +1846,14 @@ module picorv32 #(
 						timer <= cpuregs_rs1;
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 					is_lb_lh_lw_lbu_lhu && !instr_trap: begin
 						`debug($display("LD_RS1: %2d 0x%08x", decoded_rs1, cpuregs_rs1);)
 						reg_op1 <= cpuregs_rs1;
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
-						cpu_state <= cpu_state_ldmem;
+						next_cpu_state = cpu_state_ldmem;
 						mem_do_rinst <= 1;
 					end
 					is_slli_srli_srai && !BARREL_SHIFTER: begin
@@ -1707,7 +1862,7 @@ module picorv32 #(
 						dbg_rs1val <= cpuregs_rs1;
 						dbg_rs1val_valid <= 1;
 						reg_sh <= decoded_rs2;
-						cpu_state <= cpu_state_shift;
+						next_cpu_state = cpu_state_shift;
 					end
 					is_jalr_addi_slti_sltiu_xori_ori_andi, is_slli_srli_srai && BARREL_SHIFTER: begin
 						`debug($display("LD_RS1: %2d 0x%08x", decoded_rs1, cpuregs_rs1);)
@@ -1719,7 +1874,7 @@ module picorv32 #(
 							alu_wait <= 1;
 						else
 							mem_do_rinst <= mem_do_prefetch;
-						cpu_state <= cpu_state_exec;
+						next_cpu_state = cpu_state_exec;
 					end
 					default: begin
 						`debug($display("LD_RS1: %2d 0x%08x", decoded_rs1, cpuregs_rs1);)
@@ -1735,11 +1890,11 @@ module picorv32 #(
 							(* parallel_case *)
 							case (1'b1)
 								is_sb_sh_sw: begin
-									cpu_state <= cpu_state_stmem;
+									next_cpu_state = cpu_state_stmem;
 									mem_do_rinst <= 1;
 								end
 								is_sll_srl_sra && !BARREL_SHIFTER: begin
-									cpu_state <= cpu_state_shift;
+									next_cpu_state = cpu_state_shift;
 								end
 								default: begin
 									if (TWO_CYCLE_ALU || (TWO_CYCLE_COMPARE && is_beq_bne_blt_bge_bltu_bgeu)) begin
@@ -1747,11 +1902,11 @@ module picorv32 #(
 										alu_wait <= 1;
 									end else
 										mem_do_rinst <= mem_do_prefetch;
-									cpu_state <= cpu_state_exec;
+									next_cpu_state = cpu_state_exec;
 								end
 							endcase
 						end else
-							cpu_state <= cpu_state_ld_rs2;
+							next_cpu_state = cpu_state_ld_rs2;
 					end
 				endcase
 			end
@@ -1772,24 +1927,24 @@ module picorv32 #(
 							pcpi_valid <= 0;
 							reg_out <= pcpi_int_rd;
 							latched_store <= pcpi_int_wr;
-							cpu_state <= cpu_state_fetch;
+							next_cpu_state = cpu_state_fetch;
 						end else
 						if (CATCH_ILLINSN && (pcpi_timeout || instr_ecall_ebreak)) begin
 							pcpi_valid <= 0;
 							`debug($display("EBREAK OR UNSUPPORTED INSN AT 0x%08x", reg_pc);)
 							if (ENABLE_IRQ && !irq_mask[irq_ebreak] && !irq_active) begin
 								next_irq_pending[irq_ebreak] = 1;
-								cpu_state <= cpu_state_fetch;
+								next_cpu_state = cpu_state_fetch;
 							end else
-								cpu_state <= cpu_state_trap;
+								next_cpu_state = cpu_state_trap;
 						end
 					end
 					is_sb_sh_sw: begin
-						cpu_state <= cpu_state_stmem;
+						next_cpu_state = cpu_state_stmem;
 						mem_do_rinst <= 1;
 					end
 					is_sll_srl_sra && !BARREL_SHIFTER: begin
-						cpu_state <= cpu_state_shift;
+						next_cpu_state = cpu_state_shift;
 					end
 					default: begin
 						if (TWO_CYCLE_ALU || (TWO_CYCLE_COMPARE && is_beq_bne_blt_bge_bltu_bgeu)) begin
@@ -1797,7 +1952,7 @@ module picorv32 #(
 							alu_wait <= 1;
 						end else
 							mem_do_rinst <= mem_do_prefetch;
-						cpu_state <= cpu_state_exec;
+						next_cpu_state = cpu_state_exec;
 					end
 				endcase
 			end
@@ -1809,11 +1964,11 @@ module picorv32 #(
 					alu_wait <= alu_wait_2;
 				end else
 				if (is_beq_bne_blt_bge_bltu_bgeu) begin
-					latched_rd <= 0;
+					next_latched_rd = 0;
 					latched_store <= TWO_CYCLE_COMPARE ? alu_out_0_q : alu_out_0;
 					latched_branch <= TWO_CYCLE_COMPARE ? alu_out_0_q : alu_out_0;
 					if (mem_done)
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					if (TWO_CYCLE_COMPARE ? alu_out_0_q : alu_out_0) begin
 						decoder_trigger <= 0;
 						set_mem_do_rinst = 1;
@@ -1822,7 +1977,7 @@ module picorv32 #(
 					latched_branch <= instr_jalr;
 					latched_store <= 1;
 					latched_stalu <= 1;
-					cpu_state <= cpu_state_fetch;
+					next_cpu_state = cpu_state_fetch;
 				end
 			end
 
@@ -1831,7 +1986,7 @@ module picorv32 #(
 				if (reg_sh == 0) begin
 					reg_out <= reg_op1;
 					mem_do_rinst <= mem_do_prefetch;
-					cpu_state <= cpu_state_fetch;
+					next_cpu_state = cpu_state_fetch;
 				end else if (TWO_STAGE_SHIFT && reg_sh >= 4) begin
 					(* parallel_case, full_case *)
 					case (1'b1)
@@ -1870,7 +2025,7 @@ module picorv32 #(
 						set_mem_do_wdata = 1;
 					end
 					if (!mem_do_prefetch && mem_done) begin
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 						decoder_trigger <= 1;
 						decoder_pseudo_trigger <= 1;
 					end
@@ -1906,7 +2061,7 @@ module picorv32 #(
 						endcase
 						decoder_trigger <= 1;
 						decoder_pseudo_trigger <= 1;
-						cpu_state <= cpu_state_fetch;
+						next_cpu_state = cpu_state_fetch;
 					end
 				end
 			end
@@ -1925,14 +2080,14 @@ module picorv32 #(
 				if (ENABLE_IRQ && !irq_mask[irq_buserror] && !irq_active) begin
 					next_irq_pending[irq_buserror] = 1;
 				end else
-					cpu_state <= cpu_state_trap;
+					next_cpu_state = cpu_state_trap;
 			end
 			if (mem_wordsize == 1 && reg_op1[0] != 0) begin
 				`debug($display("MISALIGNED HALFWORD: 0x%08x", reg_op1);)
 				if (ENABLE_IRQ && !irq_mask[irq_buserror] && !irq_active) begin
 					next_irq_pending[irq_buserror] = 1;
 				end else
-					cpu_state <= cpu_state_trap;
+					next_cpu_state = cpu_state_trap;
 			end
 		end
 		if (CATCH_MISALIGN && resetn && mem_do_rinst && (COMPRESSED_ISA ? reg_pc[0] : |reg_pc[1:0])) begin
@@ -1940,10 +2095,10 @@ module picorv32 #(
 			if (ENABLE_IRQ && !irq_mask[irq_buserror] && !irq_active) begin
 				next_irq_pending[irq_buserror] = 1;
 			end else
-				cpu_state <= cpu_state_trap;
+				next_cpu_state = cpu_state_trap;
 		end
 		if (!CATCH_ILLINSN && decoder_trigger_q && !decoder_pseudo_trigger_q && instr_ecall_ebreak) begin
-			cpu_state <= cpu_state_trap;
+			next_cpu_state = cpu_state_trap;
 		end
 
 		if (!resetn || mem_done) begin
@@ -1964,13 +2119,35 @@ module picorv32 #(
 
 		if (!CATCH_MISALIGN) begin
 			if (COMPRESSED_ISA) begin
-				reg_pc[0] <= 0;
-				reg_next_pc[0] <= 0;
+				next_reg_pc[0] = 0;
+				next_reg_next_pc[0] = 0;
 			end else begin
-				reg_pc[1:0] <= 0;
-				reg_next_pc[1:0] <= 0;
+				next_reg_pc[1:0] = 0;
+				next_reg_next_pc[1:0] = 0;
 			end
 		end
+
+		// Captura el próximo estado en las 3 réplicas de PC, FSM principal y rd (o solo r0 si ENABLE_TMR=0)
+		if (ENABLE_TMR) begin
+			reg_pc_r0      <= next_reg_pc;
+			reg_pc_r1      <= next_reg_pc;
+			reg_pc_r2      <= next_reg_pc;
+			reg_next_pc_r0 <= next_reg_next_pc;
+			reg_next_pc_r1 <= next_reg_next_pc;
+			reg_next_pc_r2 <= next_reg_next_pc;
+			cpu_state_r0   <= next_cpu_state;
+			cpu_state_r1   <= next_cpu_state;
+			cpu_state_r2   <= next_cpu_state;
+			latched_rd_r0  <= next_latched_rd;
+			latched_rd_r1  <= next_latched_rd;
+			latched_rd_r2  <= next_latched_rd;
+		end else begin
+			reg_pc_r0      <= next_reg_pc;
+			reg_next_pc_r0 <= next_reg_next_pc;
+			cpu_state_r0   <= next_cpu_state;
+			latched_rd_r0  <= next_latched_rd;
+		end
+
 		current_pc = 'bx;
 	end
 
