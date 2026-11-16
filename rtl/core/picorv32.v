@@ -86,7 +86,8 @@ module picorv32 #(
 	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000,
 	parameter [31:0] PROGADDR_IRQ = 32'h 0000_0010,
 	parameter [31:0] STACKADDR = 32'h ffff_ffff,
-	parameter [ 0:0] ENABLE_TMR = 1
+	parameter [ 0:0] ENABLE_TMR = 1,
+	parameter [ 0:0] ENABLE_ECC = 1
 ) (
 	input clk, resetn,
 	output reg trap,
@@ -176,8 +177,11 @@ module picorv32 #(
 	reg [63:0] count_cycle, count_instr;
 	reg [31:0] reg_op1, reg_op2, reg_out;
 
-	// Contadores para fallos TMR en PC y control
+	// Contadores de fallos TMR (PC/control) y ECC en banco de registros (SBU/DBU)
 	reg [31:0] count_tmr_pc, count_tmr_ctrl;
+
+	// Contadores para fallos ECC en el banco de registros (SBU = corregidos, DBU = dobles)
+	reg [31:0] count_ecc_reg_sbu, count_ecc_reg_dbu;
 
 	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify/Yosys
 	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
@@ -246,11 +250,14 @@ module picorv32 #(
 	reg [31:0] timer;
 
 `ifndef PICORV32_REGS
-	reg [31:0] cpuregs [0:regfile_size-1];
+	// Amplía a 39 bits (32 dato + 7 Hsiao) preservando la inferencia de LUTRAM (RAM32M)
+	localparam integer REG_WIDTH = ENABLE_ECC ? 39 : 32;
+	reg [REG_WIDTH-1:0] cpuregs [0:regfile_size-1];
 
 	integer i;
 	initial begin
-		if (REGS_INIT_ZERO) begin
+		// Con ECC activo inicializa a 0 (39'h0 es palabra válida y evita X en lectura especulativa)
+		if (REGS_INIT_ZERO || ENABLE_ECC) begin
 			for (i = 0; i < regfile_size; i = i+1)
 				cpuregs[i] = 0;
 		end
@@ -728,7 +735,7 @@ module picorv32 #(
 	reg instr_lb, instr_lh, instr_lw, instr_lbu, instr_lhu, instr_sb, instr_sh, instr_sw;
 	reg instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai;
 	reg instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and;
-	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence, instr_rdtmr_pc, instr_rdtmr_ctrl;
+	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence, instr_rdtmr_pc, instr_rdtmr_ctrl, instr_rdecc_reg_sbu, instr_rdecc_reg_dbu;
 	reg instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer;
 	wire instr_trap;
 
@@ -762,11 +769,12 @@ module picorv32 #(
 			instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai,
 			instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and,
 			instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_fence,
-			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer, instr_rdtmr_pc, instr_rdtmr_ctrl};
+			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer, instr_rdtmr_pc, instr_rdtmr_ctrl, instr_rdecc_reg_sbu, instr_rdecc_reg_dbu};
 
 	wire is_rdcycle_rdcycleh_rdinstr_rdinstrh;
-	// CSRs custom de solo lectura (0xCC0/0xCC1) para telemetría de fallos TMR
+	// CSRs custom de solo lectura: TMR (0xCC0/0xCC1) y ECC de registros (0xCC2/0xCC3)
 	wire is_rdtmr = instr_rdtmr_pc || instr_rdtmr_ctrl;
+	wire is_rdecc = instr_rdecc_reg_sbu || instr_rdecc_reg_dbu;
 	assign is_rdcycle_rdcycleh_rdinstr_rdinstrh = |{instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh};
 
 	reg [63:0] new_ascii_instr;
@@ -1167,6 +1175,9 @@ module picorv32 #(
 			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010
 			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010}) && ENABLE_TMR;
 			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010}) && ENABLE_TMR;
+			// Decodifica csrr rd, 0xCC2 (ECC reg SBU) y 0xCC3 (ECC reg DBU)
+			instr_rdecc_reg_sbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC2, 5'd0, 3'b010}) && ENABLE_ECC;
+			instr_rdecc_reg_dbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC3, 5'd0, 3'b010}) && ENABLE_ECC;
 
 			instr_ecall_ebreak <= ((mem_rdata_q[6:0] == 7'b1110011 && !mem_rdata_q[31:21] && !mem_rdata_q[19:7]) ||
 					(COMPRESSED_ISA && mem_rdata_q[15:0] == 16'h9002));
@@ -1465,37 +1476,134 @@ module picorv32 #(
 	end
 
 `ifndef PICORV32_REGS
-	always @(posedge clk) begin
-		if (resetn && cpuregs_write && latched_rd)
-`ifdef PICORV32_TESTBUG_001
-			cpuregs[latched_rd ^ 1] <= cpuregs_wrdata;
-`elsif PICORV32_TESTBUG_002
-			cpuregs[latched_rd] <= cpuregs_wrdata ^ 1;
-`else
-			cpuregs[latched_rd] <= cpuregs_wrdata;
-`endif
-	end
+	// Direcciones de lectura combinacionales para puerto dual o simple
+	reg [regindex_bits-1:0] cpuregs_raddr1;
+	reg [regindex_bits-1:0] cpuregs_raddr2;
 
 	always @* begin
 		decoded_rs = 'bx;
 		if (ENABLE_REGS_DUALPORT) begin
-`ifndef RISCV_FORMAL_BLACKBOX_REGS
-			cpuregs_rs1 = decoded_rs1 ? cpuregs[decoded_rs1] : 0;
-			cpuregs_rs2 = decoded_rs2 ? cpuregs[decoded_rs2] : 0;
-`else
-			cpuregs_rs1 = decoded_rs1 ? $anyseq : 0;
-			cpuregs_rs2 = decoded_rs2 ? $anyseq : 0;
-`endif
+			cpuregs_raddr1 = decoded_rs1;
+			cpuregs_raddr2 = decoded_rs2;
 		end else begin
-			decoded_rs = (cpu_state == cpu_state_ld_rs2) ? decoded_rs2 : decoded_rs1;
-`ifndef RISCV_FORMAL_BLACKBOX_REGS
-			cpuregs_rs1 = decoded_rs ? cpuregs[decoded_rs] : 0;
-`else
-			cpuregs_rs1 = decoded_rs ? $anyseq : 0;
-`endif
-			cpuregs_rs2 = cpuregs_rs1;
+			decoded_rs     = (cpu_state == cpu_state_ld_rs2) ? decoded_rs2 : decoded_rs1;
+			cpuregs_raddr1 = decoded_rs;
+			cpuregs_raddr2 = 0;
 		end
 	end
+
+	// Lectura asíncrona cruda ([38:0] con ECC): x0 devuelve 0 fijo sin acceder a LUTRAM
+	wire [REG_WIDTH-1:0] cpuregs_raw1 = (|cpuregs_raddr1) ? cpuregs[cpuregs_raddr1] : {REG_WIDTH{1'b0}};
+	wire [REG_WIDTH-1:0] cpuregs_raw2 = (ENABLE_REGS_DUALPORT && (|cpuregs_raddr2)) ? cpuregs[cpuregs_raddr2] : {REG_WIDTH{1'b0}};
+
+	wire [REG_WIDTH-1:0] cpuregs_wrdata_enc;
+	wire [REG_WIDTH-1:0] cpuregs_scrub1_wdata;
+	wire [REG_WIDTH-1:0] cpuregs_scrub2_wdata;
+	wire [31:0]          cpuregs_rs1_dec;
+	wire [31:0]          cpuregs_rs2_dec;
+	wire [ 6:0]          cpuregs_ecc1_fix;
+	wire [ 6:0]          cpuregs_ecc2_fix;
+	wire                 regs_sbe1, regs_dbe1;
+	wire                 regs_sbe2, regs_dbe2;
+
+	// Codec Hsiao (39,32) puramente combinacional en escritura y ambos puertos de lectura
+	generate
+		if (ENABLE_ECC) begin : gen_ecc_cpuregs
+			wire [38:0] wrdata_vec;
+			wire [38:0] scrub1_vec;
+			wire [38:0] scrub2_vec;
+
+			ecc_secded_enc u_enc_cpuregs (
+				.data_i   (cpuregs_wrdata),
+				.encoded_o(wrdata_vec)
+			);
+
+			ecc_secded_dec u_dec_rs1 (
+				.encoded_i(cpuregs_raw1),
+				.data_o   (cpuregs_rs1_dec),
+				.ecc_o    (cpuregs_ecc1_fix),
+				.sbiterr_o(regs_sbe1),
+				.dbiterr_o(regs_dbe1)
+			);
+
+			if (ENABLE_REGS_DUALPORT) begin : gen_dec_rs2
+				ecc_secded_dec u_dec_rs2 (
+					.encoded_i(cpuregs_raw2),
+					.data_o   (cpuregs_rs2_dec),
+					.ecc_o    (cpuregs_ecc2_fix),
+					.sbiterr_o(regs_sbe2),
+					.dbiterr_o(regs_dbe2)
+				);
+			end else begin : gen_no_dec_rs2
+				assign cpuregs_rs2_dec  = 32'h0;
+				assign cpuregs_ecc2_fix = 7'h0;
+				assign regs_sbe2        = 1'b0;
+				assign regs_dbe2        = 1'b0;
+			end
+
+			assign scrub1_vec           = {cpuregs_ecc1_fix, cpuregs_rs1_dec};
+			assign scrub2_vec           = {cpuregs_ecc2_fix, cpuregs_rs2_dec};
+			assign cpuregs_wrdata_enc   = wrdata_vec[REG_WIDTH-1:0];
+			assign cpuregs_scrub1_wdata = scrub1_vec[REG_WIDTH-1:0];
+			assign cpuregs_scrub2_wdata = scrub2_vec[REG_WIDTH-1:0];
+		end else begin : gen_no_ecc_cpuregs
+			assign cpuregs_wrdata_enc   = cpuregs_wrdata;
+			assign cpuregs_scrub1_wdata = {REG_WIDTH{1'b0}};
+			assign cpuregs_scrub2_wdata = {REG_WIDTH{1'b0}};
+			assign cpuregs_rs1_dec      = cpuregs_raw1[31:0];
+			assign cpuregs_rs2_dec      = cpuregs_raw2[31:0];
+			assign cpuregs_ecc1_fix     = 7'h0;
+			assign cpuregs_ecc2_fix     = 7'h0;
+			assign regs_sbe1            = 1'b0;
+			assign regs_dbe1            = 1'b0;
+			assign regs_sbe2            = 1'b0;
+			assign regs_dbe2            = 1'b0;
+		end
+	endgenerate
+
+	always @* begin
+		cpuregs_rs1 = cpuregs_rs1_dec;
+		cpuregs_rs2 = ENABLE_REGS_DUALPORT ? cpuregs_rs2_dec : cpuregs_rs1_dec;
+	end
+
+	// Auto-scrubbing oportunista: cuando la CPU no escribe en rd, repara errores de 1 bit al vuelo
+	// Se mantiene un único puerto de escritura síncrono para conservar la inferencia de LUTRAM (RAM32M)
+	wire cpuregs_cpu_wen = resetn && cpuregs_write && (|latched_rd);
+	wire cpuregs_scrub1  = ENABLE_ECC && resetn && !cpuregs_cpu_wen &&
+	                       (cpu_state != cpu_state_trap) && (|cpuregs_raddr1) && regs_sbe1;
+	wire cpuregs_scrub2  = ENABLE_ECC && ENABLE_REGS_DUALPORT && resetn && !cpuregs_cpu_wen &&
+	                       (cpu_state != cpu_state_trap) && !cpuregs_scrub1 &&
+	                       (|cpuregs_raddr2) && regs_sbe2;
+
+	wire                     cpuregs_wen_final   = cpuregs_cpu_wen | cpuregs_scrub1 | cpuregs_scrub2;
+	wire [regindex_bits-1:0] cpuregs_waddr       = cpuregs_cpu_wen ? latched_rd :
+	                                               (cpuregs_scrub1 ? cpuregs_raddr1 : cpuregs_raddr2);
+	wire [REG_WIDTH-1:0]     cpuregs_wdata_final = cpuregs_cpu_wen ? cpuregs_wrdata_enc :
+	                                               (cpuregs_scrub1 ? cpuregs_scrub1_wdata : cpuregs_scrub2_wdata);
+
+	always @(posedge clk) begin
+		if (cpuregs_wen_final)
+			cpuregs[cpuregs_waddr] <= cpuregs_wdata_final;
+	end
+
+	// Deteccion de eventos ECC en cpuregs:
+	// - SBE se cuenta por cada auto-scrubbing real (1 pulso por reparacion efectiva).
+	// - DBE solo dispara trap si la instruccion actual consume realmente rs1 o rs2
+	//   en ld_rs1/ld_rs2, evitando falsos traps sobre operandos especulativos no usados.
+	wire reg_sbe_event = ENABLE_ECC && (cpuregs_scrub1 || cpuregs_scrub2);
+	wire reg_instr_no_rs1 = is_lui_auipc_jal ||
+			(ENABLE_COUNTERS && is_rdcycle_rdcycleh_rdinstr_rdinstrh) ||
+			(ENABLE_TMR && is_rdtmr) ||
+			(ENABLE_ECC && is_rdecc) ||
+			(CATCH_ILLINSN && !WITH_PCPI && instr_trap);
+	wire reg_uses_rs1 = (cpu_state == cpu_state_ld_rs1) && !reg_instr_no_rs1 && (decoded_rs1 != 0);
+	wire reg_uses_rs2 = ((is_alu_reg_reg || is_beq_bne_blt_bge_bltu_bgeu || is_sb_sh_sw) && !instr_trap || (WITH_PCPI && instr_trap)) &&
+			(decoded_rs2 != 0) &&
+			(ENABLE_REGS_DUALPORT ? (cpu_state == cpu_state_ld_rs1) : (cpu_state == cpu_state_ld_rs2));
+	wire reg_dbe_event = ENABLE_ECC && (
+			(reg_uses_rs1 && regs_dbe1) ||
+			(reg_uses_rs2 && (ENABLE_REGS_DUALPORT ? regs_dbe2 : regs_dbe1))
+	);
 `else
 	wire[31:0] cpuregs_rdata1;
 	wire[31:0] cpuregs_rdata2;
@@ -1526,6 +1634,10 @@ module picorv32 #(
 			cpuregs_rs2 = cpuregs_rs1;
 		end
 	end
+
+	// Con banco externo PICORV32_REGS no hay ECC interno en el modulo cpuregs
+	wire reg_sbe_event = 1'b0;
+	wire reg_dbe_event = 1'b0;
 `endif
 
 	assign launch_next_insn = cpu_state == cpu_state_fetch && decoder_trigger && (!ENABLE_IRQ || irq_delay || irq_active || !(irq_pending & ~irq_mask));
@@ -1581,6 +1693,15 @@ module picorv32 #(
 		end else if (ENABLE_TMR) begin
 			if (tmr_pc_err)   count_tmr_pc   <= count_tmr_pc + 1;
 			if (tmr_ctrl_err) count_tmr_ctrl <= count_tmr_ctrl + 1;
+		end
+
+		// Telemetria ECC de cpuregs: SBE (corregidos por scrubbing) y DBE (fatales)
+		if (!resetn) begin
+			count_ecc_reg_sbu <= 0;
+			count_ecc_reg_dbu <= 0;
+		end else if (ENABLE_ECC) begin
+			if (reg_sbe_event) count_ecc_reg_sbu <= count_ecc_reg_sbu + 1;
+			if (reg_dbe_event) count_ecc_reg_dbu <= count_ecc_reg_dbu + 1;
 		end
 
 		next_irq_pending = ENABLE_IRQ ? irq_pending & LATCHED_IRQ : 'bx;
@@ -1790,6 +1911,12 @@ module picorv32 #(
 					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1)
 					ENABLE_TMR && is_rdtmr: begin
 						reg_out <= instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl;
+						latched_store <= 1;
+						next_cpu_state = cpu_state_fetch;
+					end
+					// Lectura de contadores ECC de cpuregs (CSRRS 0xCC2 / 0xCC3)
+					ENABLE_ECC && is_rdecc: begin
+						reg_out <= instr_rdecc_reg_sbu ? count_ecc_reg_sbu : count_ecc_reg_dbu;
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
@@ -2114,6 +2241,15 @@ module picorv32 #(
 			mem_do_rdata <= 1;
 		if (set_mem_do_wdata)
 			mem_do_wdata <= 1;
+
+		// Error doble no corregible (DBE) al leer un operando real: anula captacion y salta a trap
+		if (ENABLE_ECC && resetn && reg_dbe_event) begin
+			mem_do_prefetch <= 0;
+			mem_do_rinst <= 0;
+			mem_do_rdata <= 0;
+			mem_do_wdata <= 0;
+			next_cpu_state = cpu_state_trap;
+		end
 
 		irq_pending <= next_irq_pending & ~MASKED_IRQ;
 

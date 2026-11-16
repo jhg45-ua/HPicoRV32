@@ -1,7 +1,7 @@
 // =============================================================================
 // Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
 // Módulo:       soc.v
-// Descripción:  Módulo raíz del SoC Harvard (PicoRV32 TMR + IMEM 8 KB + DMEM 8 KB + UART + LEDs)
+// Descripción:  Módulo raíz del SoC Harvard (PicoRV32 TMR + IMEM_ECC 8 KB + DMEM_ECC 8 KB + UART + LEDs)
 // Reloj/Reset:  clk (flanco subida, 100 MHz) | resetn (activo bajo)
 // =============================================================================
 
@@ -30,7 +30,7 @@ module soc #(
   // Interfaz nativa de memoria de PicoRV32 (protocolo valid/ready, sin AXI)
   wire        mem_valid;
   wire        mem_instr;
-  reg         mem_ready;
+  wire        mem_ready;
   wire [31:0] mem_addr;
   wire [31:0] mem_wdata;
   wire [ 3:0] mem_wstrb;
@@ -38,8 +38,8 @@ module soc #(
 
   // Límites de direcciones en bytes para partición Harvard (IMEM seguida de DMEM)
   localparam [31:0] IMEM_BYTES = IMEM_WORDS * 4;
-  localparam [31:0] DMEM_BASE  = IMEM_BYTES;
-  localparam [31:0] DMEM_END   = IMEM_BYTES + (DMEM_WORDS * 4);
+  localparam [31:0] DMEM_BASE = IMEM_BYTES;
+  localparam [31:0] DMEM_END = IMEM_BYTES + (DMEM_WORDS * 4);
 
   // Decodificador combinacional Harvard:
   // - IMEM: fetch de instrucciones (mem_instr=1) o lectura de constantes .rodata (wstrb=0)
@@ -47,13 +47,14 @@ module soc #(
   wire imem_range = (mem_addr < IMEM_BYTES);
   wire dmem_range = (mem_addr >= DMEM_BASE) && (mem_addr < DMEM_END);
 
-  wire imem_sel     = mem_valid && imem_range && !(|mem_wstrb);
-  wire dmem_sel     = mem_valid && dmem_range && !mem_instr;
+  wire imem_sel = mem_valid && imem_range && !(|mem_wstrb);
+  wire dmem_sel = mem_valid && dmem_range && !mem_instr;
   // Detecta escritura sobre IMEM o ejecución desde DMEM (política W^X)
-  wire harv_err     = mem_valid && ((imem_range && (|mem_wstrb)) || (dmem_range && mem_instr));
-  wire leds_sel     = mem_valid && (mem_addr == 32'h1000_0000);
+  wire harv_err = mem_valid && ((imem_range && (|mem_wstrb)) || (dmem_range && mem_instr));
+  wire leds_sel = mem_valid && (mem_addr == 32'h1000_0000);
   wire uart_div_sel = mem_valid && (mem_addr == 32'h2000_0004);
   wire uart_dat_sel = mem_valid && (mem_addr == 32'h2000_0008);
+  wire ecc_stat_sel = mem_valid && (mem_addr[31:4] == 28'h3000_000) && (mem_addr[1:0] == 2'b00);
 
   // Núcleo PicoRV32 RV32I con endurecimiento TMR selectivo en PC y control
   wire cpu_trap;
@@ -69,7 +70,8 @@ module soc #(
       .CATCH_MISALIGN      (1),
       .CATCH_ILLINSN       (1),
       .REGS_INIT_ZERO      (1),
-      .ENABLE_TMR          (1)
+      .ENABLE_TMR          (1),
+      .ENABLE_ECC          (1)
   ) cpu (
       .clk         (clk),
       .resetn      (sys_resetn),
@@ -98,37 +100,55 @@ module soc #(
       .eoi         ()
   );
 
-  // IMEM: 8 KB (instrucciones + .rodata), solo lectura desde el bus de la CPU
+  // IMEM: 8 KB con Hsiao SEC-DED (READ_ONLY=1 desde bus, pero con auto-scrubbing interno)
   wire [31:0] imem_rdata;
+  wire        imem_ready;
+  wire        imem_sbe;
+  wire        imem_dbe;
 
-  bram_sp #(
+  bram_ecc #(
       .WORDS    (IMEM_WORDS),
       .ADDR_BITS(11),
+      .READ_ONLY(1'b1),
       .USE_INIT (1'b1),
       .INIT_FILE(FIRMWARE_FILE)
   ) imem (
-      .clk  (clk),
-      .en   (imem_sel && !mem_ready),
-      .wstrb(4'b0000),
-      .addr (mem_addr[12:2]),
-      .wdata(32'h0),
-      .rdata(imem_rdata)
+      .clk    (clk),
+      .resetn (sys_resetn),
+      .valid_i(imem_sel),
+      .wstrb_i(4'b0000),
+      .addr_i (mem_addr[12:2]),
+      .wdata_i(32'h0),
+      .rdata_o(imem_rdata),
+      .ready_o(imem_ready),
+      .sbe_o  (imem_sbe),
+      .dbe_o  (imem_dbe)
   );
 
-  // DMEM: 8 KB (variables + pila), lectura/escritura sin precarga
+  // DMEM: 8 KB con Hsiao SEC-DED + RMW para sb/sh y auto-scrubbing
   wire [31:0] dmem_rdata;
+  wire        dmem_ready;
+  wire        dmem_sbe;
+  wire        dmem_dbe;
+  reg         harv_fault_r;  // Latch de violación W^X (declarado antes de su uso en dmem)
+  reg         ecc_fault_r;   // Latch de DBE incorregible en IMEM o DMEM
 
-  bram_sp #(
+  bram_ecc #(
       .WORDS    (DMEM_WORDS),
       .ADDR_BITS(11),
+      .READ_ONLY(1'b0),
       .USE_INIT (1'b0)
   ) dmem (
-      .clk  (clk),
-      .en   (dmem_sel && !mem_ready),
-      .wstrb(mem_wstrb),
-      .addr (mem_addr[12:2]),
-      .wdata(mem_wdata),
-      .rdata(dmem_rdata)
+      .clk    (clk),
+      .resetn (sys_resetn),
+      .valid_i(dmem_sel),
+      .wstrb_i((harv_fault_r || ecc_fault_r) ? 4'b0000 : mem_wstrb),
+      .addr_i (mem_addr[12:2]),
+      .wdata_i(mem_wdata),
+      .rdata_o(dmem_rdata),
+      .ready_o(dmem_ready),
+      .sbe_o  (dmem_sbe),
+      .dbe_o  (dmem_dbe)
   );
 
   // Controlador UART (divisor a 115200 baudios configurado por firmware)
@@ -152,59 +172,67 @@ module soc #(
       .reg_dat_wait(uart_dat_wait)
   );
 
-  // Controlador síncrono de respuesta del bus y multiplexor de lectura
-  reg        imem_read_r;   // 1 en el ciclo tras aceptar lectura de IMEM
-  reg        dmem_read_r;   // 1 en el ciclo tras aceptar lectura de DMEM
-  reg        harv_fault_r;  // Latch de violación W^X (se mantiene hasta reset)
+  // Telemetría ECC de memorias (acceso MMIO R/O en 0x3000_0000..0x3000_000C)
+  reg [31:0] count_ecc_imem_sbu;
+  reg [31:0] count_ecc_imem_dbu;
+  reg [31:0] count_ecc_dmem_sbu;
+  reg [31:0] count_ecc_dmem_dbu;
+
+  reg        bus_ready_r;  // Pulso ready de 1 ciclo para periféricos MMIO y harv_err
   reg [31:0] mmio_rdata;
 
-  // LED15 se enciende ante trampa interna de CPU o violación Harvard
-  assign trap = cpu_trap | harv_fault_r;
+  // LED15 se enciende ante trampa de CPU, violación Harvard o DBE en memoria
+  assign trap = cpu_trap | harv_fault_r | ecc_fault_r;
 
-  // Mux combinacional: entrega la salida registrada de la BRAM correspondiente o MMIO
-  assign mem_rdata = imem_read_r ? imem_rdata :
-                     dmem_read_r ? dmem_rdata : mmio_rdata;
+  // Sin lazo combinacional: mem_ready solo combina 3 flip-flops (uno activo a la vez)
+  assign mem_ready = imem_ready || dmem_ready || bus_ready_r;
+
+  assign mem_rdata = imem_ready ? imem_rdata : dmem_ready ? dmem_rdata : mmio_rdata;
 
   always @(posedge clk) begin
     if (!sys_resetn) begin
-      mem_ready    <= 1'b0;
-      imem_read_r  <= 1'b0;
-      dmem_read_r  <= 1'b0;
-      harv_fault_r <= 1'b0;
-      mmio_rdata   <= 32'h0;
-      leds         <= 15'h0;
+      bus_ready_r        <= 1'b0;
+      harv_fault_r       <= 1'b0;
+      ecc_fault_r        <= 1'b0;
+      mmio_rdata         <= 32'h0;
+      leds               <= 15'h0;
+      count_ecc_imem_sbu <= 32'h0;
+      count_ecc_imem_dbu <= 32'h0;
+      count_ecc_dmem_sbu <= 32'h0;
+      count_ecc_dmem_dbu <= 32'h0;
     end else begin
-      // Por defecto desactivados: mem_ready e *_read_r son pulsos de 1 ciclo
-      mem_ready   <= 1'b0;
-      imem_read_r <= 1'b0;
-      dmem_read_r <= 1'b0;
+      bus_ready_r <= 1'b0;
+
+      if (imem_sbe) count_ecc_imem_sbu <= count_ecc_imem_sbu + 32'd1;
+      if (imem_dbe) count_ecc_imem_dbu <= count_ecc_imem_dbu + 32'd1;
+      if (dmem_sbe) count_ecc_dmem_sbu <= count_ecc_dmem_sbu + 32'd1;
+      if (dmem_dbe) count_ecc_dmem_dbu <= count_ecc_dmem_dbu + 32'd1;
+      if (imem_dbe || dmem_dbe) ecc_fault_r <= 1'b1;
 
       if (mem_valid && !mem_ready) begin
-        if (imem_sel) begin
-          // IMEM captura addr en este flanco; el dato queda válido en el ciclo siguiente
-          imem_read_r <= 1'b1;
-          mem_ready   <= 1'b1;
-        end else if (dmem_sel) begin
-          // DMEM captura addr/wdata en este flanco; solo activa dmem_read_r si es lectura
-          dmem_read_r <= !(|mem_wstrb);
-          mem_ready   <= 1'b1;
-        end else if (harv_err) begin
-          // Cierra el ciclo de bus para no bloquear la CPU y dispara trap (LED15)
+        if (harv_err) begin
           harv_fault_r <= 1'b1;
-          mem_ready    <= 1'b1;
+          bus_ready_r  <= 1'b1;
         end else if (leds_sel) begin
-          if (|mem_wstrb) leds <= mem_wdata[14:0];
-          mmio_rdata <= {17'b0, leds};
-          mem_ready  <= 1'b1;
+          if ((|mem_wstrb) && !harv_fault_r && !ecc_fault_r) leds <= mem_wdata[14:0];
+          mmio_rdata  <= {17'b0, leds};
+          bus_ready_r <= 1'b1;
         end else if (uart_div_sel) begin
-          mmio_rdata <= uart_div_do;
-          mem_ready  <= 1'b1;
+          mmio_rdata  <= uart_div_do;
+          bus_ready_r <= 1'b1;
         end else if (uart_dat_sel) begin
-          // Mantiene en espera a la CPU hasta que termine el envío TX UART anterior
           if (!uart_dat_wait) begin
-            mmio_rdata <= uart_dat_do;
-            mem_ready  <= 1'b1;
+            mmio_rdata  <= uart_dat_do;
+            bus_ready_r <= 1'b1;
           end
+        end else if (ecc_stat_sel) begin
+          case (mem_addr[3:2])
+            2'b00: mmio_rdata <= count_ecc_imem_sbu;
+            2'b01: mmio_rdata <= count_ecc_imem_dbu;
+            2'b10: mmio_rdata <= count_ecc_dmem_sbu;
+            2'b11: mmio_rdata <= count_ecc_dmem_dbu;
+          endcase
+          bus_ready_r <= 1'b1;
         end
       end
     end
