@@ -43,7 +43,7 @@ set_property -dict [list \
     CONFIG.Enable_A {Use_ENA_Pin} \
     CONFIG.Enable_B {Use_ENB_Pin} \
     CONFIG.Use_Byte_Write_Enable {false} \
-    CONFIG.ECC {true} \
+    CONFIG.ECC {false} \
     CONFIG.ecctype {Soft_ECC} \
     CONFIG.softecc {true} \
     CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
