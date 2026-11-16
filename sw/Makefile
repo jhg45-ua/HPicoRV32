@@ -54,7 +54,7 @@ $(BUILD_DIR)/$(APP).bin: $(BUILD_DIR)/$(APP).elf
 	$(TOOLCHAIN)objcopy -O binary $< $@
 
 $(BUILD_DIR)/firmware.hex: $(BUILD_DIR)/$(APP).bin $(MAKEHEX)
-	python3 $(MAKEHEX) $< $(MEM_WORDS) > $@
+	python3 $(MAKEHEX) $< $(MEM_WORDS) --ecc > $@
 
 clean:
 	rm -f $(BUILD_DIR)/*.elf $(BUILD_DIR)/*.bin $(BUILD_DIR)/*.hex $(BUILD_DIR)/*.map
