@@ -1,7 +1,7 @@
 % ==============================================================================
 % Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
 % Archivo:      docs/arch/diagram.tex
-% Descripción:  Diagrama de bloques de la arquitectura base del SoC (Hito 0)
+% Descripción:  Diagrama de bloques de la arquitectura endurecida del SoC (Hito 2)
 %               Colores xcolor estándar y coordenadas centradas para Oleafly
 % Compilación:  pdflatex diagram.tex  (o copiar tikzpicture en diagram.tikz)
 % ==============================================================================
@@ -76,14 +76,14 @@
 % ==============================================================================
 % 0. Cabecera
 % ==============================================================================
-\node[font=\normalsize\bfseries] at (2.10, 18.00)
-  {\textcolor{red!70!black}{SHRV32} - 2026};
+%\node[font=\normalsize\bfseries] at (2.10, 18.00)
+  %{\textcolor{red!70!black}{SHRV32} - 2026};
 \node[font=\huge\bfseries] at (12.45, 17.95)
   {SHRV32};
-\node[font=\normalsize\bfseries] at (12.45, 17.30)
-  {SoC Architecture Block Diagram};
-\node[font=\normalsize\bfseries] at (22.80, 18.00)
-  {Nexys A7-100T $\cdot$ xc7a100t};
+%\node[font=\normalsize\bfseries] at (12.45, 17.30)
+  %{Space-Hardened RISC-V 32};
+%\node[font=\normalsize\bfseries] at (22.80, 18.00)
+  %{Nexys A7-100T $\cdot$ xc7a100t};
 
 % ==============================================================================
 % 1. Columna Izquierda: Clock & POR + Trap + Leyenda / Métricas
@@ -115,44 +115,34 @@
 \draw[sig] (por_cnt.south) -- (sys_rst.north);
 
 % --- Indicador de Trampa (LED15) ---
-\node[blk, fill=gray!35, minimum width=4.20cm, minimum height=1.35cm]
+\node[blk, fill=gray!35, minimum width=4.20cm, minimum height=1.65cm]
   (trap_blk) at (2.10, 8.15)
-  {\textbf{Trap Indicator}\\\scriptsize trap $\rightarrow$ LED15 (Pin V11)\\\scriptsize ILLINSN $\cdot$ MISALIGN};
+  {\textbf{Trap Indicator (LED15)}\\\fontsize{6.3}{7.8}\selectfont cpu\_trap | harv\_fault\_r | ecc\_fault\_r\\\fontsize{6.3}{7.8}\selectfont ILLINSN $\cdot$ MISALIGN $\cdot$ W\^{}X\\\fontsize{6.3}{7.8}\selectfont Reg / Mem DBE};
 
-% --- Leyenda de Niveles y Métricas Base (Vivado impl_1) ---
-\node[container, fill=gray!10, minimum width=4.20cm, minimum height=5.87cm]
-  (leyenda_box) at (2.10, 3.265) {};
-\node[font=\footnotesize\bfseries] at (2.10, 5.82)
-  {Leyenda y Métricas (Hito 0)};
-\draw[line width=0.6pt, gray!60] (0.24, 5.55) -- (3.96, 5.55);
+% --- Leyenda de Niveles ---
+\node[container, fill=gray!10, minimum width=4.20cm, minimum height=3.80cm]
+  (leyenda_box) at (2.10, 3.68) {};
+\node[font=\footnotesize\bfseries] at (2.10, 5.22)
+  {Leyenda};
+\draw[line width=0.6pt, gray!60] (0.24, 4.95) -- (3.96, 4.95);
 
-\node[swatch, fill=violet!32] (sw_fe) at (0.44, 5.18) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 5.18) {Front-End $\cdot$ Control / POR};
+\node[swatch, fill=violet!32] (sw_fe) at (0.44, 4.54) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 4.54) {Front-End $\cdot$ POR};
 
-\node[swatch, fill=orange!62] (sw_dec) at (0.44, 4.72) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 4.72) {Decode $\cdot$ Counters};
+\node[swatch, fill=orange!62] (sw_dec) at (0.44, 4.08) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 4.08) {Decode $\cdot$ CSRs $\cdot$ W\^{}X};
 
-\node[swatch, fill=yellow!35] (sw_bus) at (0.44, 4.26) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 4.26) {Regfile $\cdot$ Bus SoC};
+\node[swatch, fill=yellow!35] (sw_bus) at (0.44, 3.62) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 3.62) {Regfile $\cdot$ SoC Bus};
 
-\node[swatch, fill=blue!28] (sw_exec) at (0.44, 3.80) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 3.80) {Execution $\cdot$ Mem IF};
+\node[swatch, fill=blue!28] (sw_exec) at (0.44, 3.16) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 3.16) {Execution $\cdot$ Native Mem IF};
 
-\node[swatch, fill=green!42] (sw_mem) at (0.44, 3.34) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 3.34) {BRAM $\cdot$ Periféricos};
+\node[swatch, fill=green!42] (sw_mem) at (0.44, 2.70) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 2.70) {BRAM $\cdot$ Periféricos};
 
-\node[swatch, fill=gray!35] (sw_io) at (0.44, 2.88) {};
-\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 2.88) {I/O Física $\cdot$ Estado};
-
-\draw[line width=0.6pt, gray!60] (0.24, 2.54) -- (3.96, 2.54);
-\node[font=\footnotesize\bfseries] at (2.10, 2.28)
-  {Vivado impl\_1 (xc7a100t)};
-\node[align=center, font=\scriptsize] at (2.10, 1.22)
-  {\textbf{LUTs:} 1\,114 (1.76\%)\\
-   \textbf{FFs:} 703 (0.55\%)\\
-   \textbf{BRAM:} 4 $\times$ RAMB36E1 (16 KB)\\
-   \textbf{WNS (100 MHz):} +3.531 ns\\
-   \textbf{Fmax est.:} $\approx$ 154.6 MHz};
+\node[swatch, fill=gray!35] (sw_io) at (0.44, 2.24) {};
+\node[font=\scriptsize\bfseries, text width=3.20cm, align=left] at (2.40, 2.24) {I/O Física $\cdot$ Backend / Init};
 
 % ==============================================================================
 % 2. Núcleo PicoRV32 (rtl/core/picorv32.v)
@@ -160,34 +150,34 @@
 \node[container, fill=gray!8, minimum width=19.20cm, minimum height=9.65cm]
   (core_box) at (15.30, 11.575) {};
 \node[font=\small] at (15.30, 16.08)
-  {\textbf{Core: picorv32} \scriptsize (RV32I $\cdot$ COMPRESSED\_ISA=0 $\cdot$ rtl/core/picorv32.v)};
+  {\textbf{Core: picorv32} \scriptsize (RV32I $\cdot$ \textcolor{red!70!black}{\textbf{[TMR]}} = 3$\times$FF \texttt{\_r0..2} + \texttt{tmr\_voter} 2-of-3 + 1-Cyc Self-Healing $\cdot$ Regfile ECC $\cdot$ rtl/core/picorv32.v)};
 
 % --- Nivel A: Front-End & Control (Morado) ---
-\node[blk, fill=violet!32, minimum width=5.15cm, minimum height=1.15cm]
+\node[blk, fill=violet!32, minimum width=5.15cm, minimum height=1.20cm]
   (pc_unit) at (8.75, 14.50)
-  {\textbf{Program Counter}\\\scriptsize reg\_pc[31:0] $\cdot$ reg\_next\_pc[31:0]};
+  {\textbf{Program Counter}\\\scriptsize reg\_pc[31:0] $\cdot$ reg\_next\_pc[31:0] \textcolor{red!70!black}{\textbf{[TMR]}}};
 
-\node[blk, fill=violet!32, minimum width=5.10cm, minimum height=1.15cm]
+\node[blk, fill=violet!32, minimum width=5.10cm, minimum height=1.20cm]
   (fetch_unit) at (15.00, 14.50)
-  {\textbf{Instruction Fetch / Latch}\\\scriptsize mem\_rdata\_latched $\cdot$ mem\_do\_rinst};
+  {\textbf{Instruction Fetch / Latch}\\\scriptsize mem\_rdata\_latched $\cdot$ mem\_do\_rinst\\\scriptsize latched\_rd[4:0] \textcolor{red!70!black}{\textbf{[TMR]}}};
 
-\node[blk, fill=violet!32, minimum width=5.25cm, minimum height=1.15cm]
+\node[blk, fill=violet!32, minimum width=5.25cm, minimum height=1.20cm]
   (ctrl_fsm) at (20.95, 14.50)
-  {\textbf{Control FSM (cpu\_state[7:0])}\\\scriptsize fetch $\cdot$ ld\_rs1/2 $\cdot$ exec $\cdot$ mem $\cdot$ trap};
+  {\textbf{Control FSM}\\\scriptsize cpu\_state[7:0] \textcolor{red!70!black}{\textbf{[TMR]}}\\\scriptsize fetch $\cdot$ ld\_rs1/2 $\cdot$ exec $\cdot$ mem $\cdot$ trap};
 
 % --- Nivel B: Decode & Counters (Naranja) ---
 \node[blk, fill=orange!62, minimum width=10.10cm, minimum height=1.20cm]
   (decoder) at (11.20, 12.60)
-  {\textbf{RV32I Instruction Decoder}\\\scriptsize instr\_* $\cdot$ CATCH\_ILLINSN=1 $\cdot$ CATCH\_MISALIGN=1};
+  {\textbf{RV32I Instruction \& CSR Decoder}\\\scriptsize instr\_* $\cdot$ CATCH\_ILLINSN=1 $\cdot$ CATCH\_MISALIGN=1\\\scriptsize CSR 0xCC0--0xCC3 $\cdot$ reg\_uses\_rs1/2};
 
 \node[blk, fill=orange!62, minimum width=6.25cm, minimum height=1.20cm]
   (counters) at (20.45, 12.60)
-  {\textbf{Hardware Counters (32b)}\\\scriptsize count\_cycle $\cdot$ count\_instr\\\scriptsize ENABLE\_COUNTERS=1};
+  {\textbf{Hardware \& Fault CSRs (32b R/O)}\\\scriptsize cycle/instr $\cdot$ tmr\_pc/ctrl (0xCC0/1)\\\scriptsize ecc\_reg\_sbu/dbu (0xCC2/3)};
 
 % --- Nivel C: Register File & Operands (Amarillo) ---
 \node[blk, fill=yellow!35, minimum width=10.10cm, minimum height=1.25cm]
   (regfile) at (11.20, 10.60)
-  {\textbf{Register File (cpuregs[0:31])}\\\scriptsize 32 $\times$ 32b Dual-Port LUTRAM $\cdot$ REGS\_INIT\_ZERO=1};
+  {\textbf{Register File + Hsiao SEC-DED (39,32)}\\\scriptsize cpuregs[0:31] $\cdot$ 32$\times$39b LUTRAM (14$\times$RAM32M)\\\scriptsize 1-Cyc Auto-Scrubbing $\cdot$ reg\_dbe\_event $\rightarrow$ trap};
 
 \node[blk, fill=yellow!35, minimum width=6.25cm, minimum height=1.25cm]
   (op_regs) at (20.45, 10.60)
@@ -204,17 +194,18 @@
 
 \node[blk, fill=blue!28, minimum width=5.25cm, minimum height=1.35cm]
   (mem_if) at (20.95, 8.10)
-  {\textbf{Native Memory Interface}\\\scriptsize mem\_state[1:0] $\cdot$ Valid/Ready\\\scriptsize mem\_valid $\cdot$ mem\_instr $\cdot$ mem\_wstrb};
+  {\textbf{Native Memory Interface}\\\scriptsize mem\_state[1:0] \textcolor{red!70!black}{\textbf{[TMR]}} $\cdot$ Valid/Ready\\\scriptsize mem\_valid $\cdot$ mem\_instr $\cdot$ mem\_wstrb};
 
 % --- Conexiones internas de picorv32 ---
 \draw[bisig] (pc_unit.east) -- (fetch_unit.west);
 \draw[sig] (fetch_unit.east) -- (ctrl_fsm.west);
 
-\draw[sig] (13.70, 13.925) -- (13.70, 13.20);
-\draw[tick] (13.61, 13.44) -- (13.79, 13.68);
-\node[lbl] at (14.55, 13.56) {32b (insn)};
+\draw[sig] (13.70, 13.90) -- (13.70, 13.20);
+\draw[tick] (13.61, 13.43) -- (13.79, 13.67);
+\node[lbl] at (14.55, 13.55) {32b (insn)};
 
-\draw[sig] (20.95, 13.925) -- (20.95, 13.20);
+\draw[sig] (20.95, 13.90) -- (20.95, 13.20);
+\node[lbl] at (22.00, 13.55) {tmr/ecc\_err};
 
 \draw[sig] (decoder.south) -- (regfile.north);
 \draw[tick] (11.11, 11.49) -- (11.29, 11.73);
@@ -264,103 +255,122 @@
 \node[lbl] at (4.95, 11.58) {sys\_resetn};
 
 \draw[sig] (5.70, 8.15) -- (trap_blk.east);
-\node[lbl] at (4.95, 8.38) {trap};
+\node[lbl] at (4.95, 8.38) {cpu\_trap};
 
 % ==============================================================================
-% 3. Nivel E: Bus Nativo SoC y Decodificador de Direcciones (soc.v)
+% 3. Nivel E: Bus Nativo Harvard SoC y Decodificador de Direcciones (soc.v)
 % ==============================================================================
-\node[blk, fill=orange!62, minimum width=5.40cm, minimum height=1.35cm]
-  (addr_dec) at (8.85, 4.90)
-  {\textbf{Address Decoder (Comb.)}\\\scriptsize ram\_sel: 0x0000\_0000--3FFF\\\scriptsize leds: 0x1000\_0000 $\cdot$ uart: 0x2000\_0004/8};
+\node[blk, fill=orange!62, minimum width=5.30cm, minimum height=1.35cm]
+  (addr_dec) at (8.80, 4.90)
+  {\textbf{Harvard Address Decoder (Comb.)}\\\fontsize{6.5}{8.0}\selectfont imem: 0x0000--1FFF $\cdot$ dmem: 2000--3FFF\\\fontsize{6.5}{8.0}\selectfont W\^{}X (harv\_err) $\cdot$ leds/uart/ecc (0x1/2/3000\_*)};
 
-\node[blk, fill=yellow!35, minimum width=5.10cm, minimum height=1.35cm]
-  (bus_ctrl) at (15.00, 4.90)
-  {\textbf{Bus Controller (Sync.)}\\\scriptsize mem\_ready (1 cyc) $\cdot$ ram\_read\_r\\\scriptsize mmio\_rdata[31:0] $\cdot$ UART Stall};
+\node[blk, fill=yellow!35, minimum width=5.20cm, minimum height=1.35cm]
+  (bus_ctrl) at (14.85, 4.90)
+  {\textbf{MMIO \& ECC Telemetry Ctrl (Sync.)}\\\fontsize{6.5}{8.0}\selectfont bus\_ready\_r $\cdot$ harv\_fault\_r $\cdot$ ecc\_fault\_r\\\fontsize{6.5}{8.0}\selectfont count\_ecc\_imem/dmem\_sbu/dbu (0x3000\_*)};
 
-\node[blk, fill=yellow!18, minimum width=5.25cm, minimum height=1.35cm]
+\node[blk, fill=yellow!18, minimum width=5.40cm, minimum height=1.35cm]
   (rdata_mux) at (20.95, 4.90)
-  {\textbf{Read Data Mux}\\\scriptsize mem\_rdata = ram\_read\_r\\\scriptsize ? ram\_rdata : mmio\_rdata};
+  {\textbf{Harvard Mem Interface \& Read Mux}\\\fontsize{6.5}{8.0}\selectfont mem\_ready = imem | dmem | bus\_ready\_r\\\fontsize{6.5}{8.0}\selectfont mem\_rdata = imem / dmem / mmio\_rdata};
 
 % Conexiones Core <-> Nivel E (sin cruces)
-\draw[sig] (18.90, 7.425) -- (18.90, 6.20) -- (8.85, 6.20) -- (addr_dec.north);
-\draw[sig] (15.00, 6.20) -- (bus_ctrl.north);
-\fill[black] (15.00, 6.20) circle (0.055);
-\draw[tick] (11.835, 6.08) -- (12.015, 6.32);
-\node[lbl] at (11.925, 6.46) {32b (addr/wdata $\cdot$ valid $\cdot$ wstrb)};
+\draw[sig] (18.60, 7.425) -- (18.60, 6.20) -- (8.80, 6.20) -- (addr_dec.north);
+\draw[sig] (14.85, 6.20) -- (bus_ctrl.north);
+\fill[black] (14.85, 6.20) circle (0.055);
+\draw[sig] (18.60, 6.20) -- (18.60, 5.575);
+\fill[black] (18.60, 6.20) circle (0.055);
+\draw[tick] (11.735, 6.08) -- (11.915, 6.32);
+\node[lbl] at (11.825, 6.46) {32b (addr/wdata $\cdot$ valid $\cdot$ wstrb $\cdot$ instr)};
 
-\draw[sig] (16.95, 5.575) -- (16.95, 5.90) -- (20.55, 5.90) -- (20.55, 7.425);
-\node[lbl] at (18.75, 5.71) {mem\_ready};
+\draw[sig] (20.55, 5.575) -- (20.55, 7.425);
+\node[lbl] at (19.65, 6.50) {mem\_ready};
 
-\draw[sig] (22.30, 5.575) -- (22.30, 7.425);
-\draw[tick] (22.21, 6.30) -- (22.39, 6.54);
-\node[lbl] at (23.55, 6.42) {32b (mem\_rdata)};
+\draw[sig] (22.45, 5.575) -- (22.45, 7.425);
+\draw[tick] (22.36, 6.38) -- (22.54, 6.62);
+\node[lbl] at (23.70, 6.50) {32b (mem\_rdata)};
 
 \draw[sig] (addr_dec.east) -- (bus_ctrl.west);
-\node[lbl] at (12.00, 5.15) {*\_sel};
+\node[lbl] at (11.85, 5.15) {*\_sel};
 
 \draw[sig] (bus_ctrl.east) -- (rdata_mux.west);
-\draw[tick] (17.85, 4.78) -- (18.03, 5.02);
-\node[lbl] at (17.94, 5.20) {32b};
+\draw[tick] (17.76, 4.78) -- (17.94, 5.02);
+\node[lbl] at (17.85, 5.20) {32b};
 
 % ==============================================================================
-% 4. Nivel F: Memoria y Periféricos MMIO (Verde)
+% 4. Nivel F: Memorias Harvard bram_ecc y Periféricos MMIO (Verde)
 % ==============================================================================
-\node[blk, fill=green!42, minimum width=5.40cm, minimum height=1.40cm]
-  (leds_blk) at (8.85, 2.48)
+\node[blk, fill=green!42, minimum width=3.70cm, minimum height=1.40cm]
+  (leds_blk) at (8.00, 2.48)
   {\textbf{leds (GPIO MMIO)}\\\scriptsize leds[14:0] (15b Reg R/W)\\\scriptsize Dir: 0x1000\_0000};
 
-\node[blk, fill=green!42, minimum width=5.10cm, minimum height=1.40cm]
-  (uart_blk) at (15.00, 2.48)
+\node[blk, fill=green!42, minimum width=4.00cm, minimum height=1.40cm]
+  (uart_blk) at (12.15, 2.48)
   {\textbf{simpleuart (115200 bps)}\\\scriptsize cfg\_divider (0x2000\_0004)\\\scriptsize RX/TX Data (0x2000\_0008)};
 
-\node[blk, fill=green!42, minimum width=5.25cm, minimum height=1.40cm]
-  (bram_blk) at (20.95, 2.48)
-  {\textbf{bram\_sp (BRAM Unificada $\cdot$ 16 KB)}\\\scriptsize 4096$\times$32b (4$\times$RAMB36E1) $\cdot$ wstrb[3:0]\\\scriptsize 0x0000\_0000--3FFF $\cdot$ 1-cyc Sync Read};
+\node[blk, fill=green!42, minimum width=4.45cm, minimum height=1.40cm]
+  (imem_blk) at (16.675, 2.48)
+  {\textbf{imem: bram\_ecc (8 KB $\cdot$ RO)}\\\scriptsize 2048$\times$39b Hsiao SEC-DED\\\scriptsize 0x0000\_0000--1FFF $\cdot$ Scrub (2/3c)};
+
+\node[blk, fill=green!42, minimum width=4.45cm, minimum height=1.40cm]
+  (dmem_blk) at (21.425, 2.48)
+  {\textbf{dmem: bram\_ecc (8 KB $\cdot$ R/W)}\\\scriptsize 2048$\times$39b Hsiao / Vivado Soft ECC IP\\\scriptsize 0x0000\_2000--3FFF $\cdot$ RMW \& Scrub};
 
 % Conexiones Nivel E <-> Nivel F (rutas disjuntas, sin cruces)
-\draw[bisig] (12.85, 4.225) -- (12.85, 3.70) -- (8.85, 3.70) -- (leds_blk.north);
-\draw[tick] (10.76, 3.58) -- (10.94, 3.82);
-\node[lbl] at (10.85, 3.96) {15b};
+\draw[bisig] (12.60, 4.225) -- (12.60, 3.72) -- (8.00, 3.72) -- (leds_blk.north);
+\draw[tick] (10.21, 3.60) -- (10.39, 3.84);
+\node[lbl] at (10.30, 3.98) {15b};
 
-\draw[sig] (14.35, 4.225) -- (14.35, 3.18);
-\node[lbl] at (13.65, 3.70) {we/re/di};
-\draw[sig] (15.75, 3.18) -- (15.75, 4.225);
-\node[lbl] at (16.43, 3.70) {do/wait};
+\draw[sig] (13.15, 4.225) -- (13.15, 3.18);
+\node[lbl] at (12.48, 3.45) {we/re/di};
+\draw[sig] (13.95, 3.18) -- (13.95, 4.225);
+\node[lbl] at (14.62, 3.70) {do/wait};
 
-\draw[sig] (17.15, 4.225) -- (17.15, 3.70) -- (19.85, 3.70) -- (19.85, 3.18);
-\draw[tick] (18.41, 3.58) -- (18.59, 3.82);
-\node[lbl] at (18.50, 3.96) {en, addr, wdata};
+\draw[sig] (15.80, 3.18) -- (15.80, 4.225);
+\node[lbl] at (16.48, 3.70) {sbe/dbe};
 
-\draw[sig] (22.30, 3.18) -- (22.30, 4.225);
-\draw[tick] (22.21, 3.58) -- (22.39, 3.82);
-\node[lbl] at (23.55, 3.70) {32b (ram\_rdata)};
+\draw[bisig] (18.55, 4.225) -- (18.55, 3.18);
+\draw[tick] (18.46, 3.58) -- (18.64, 3.82);
+\node[lbl, align=center] at (19.45, 3.70) {addr/rdata\\ready};
+
+\draw[sig] (20.30, 4.225) -- (20.30, 3.18);
+\node[lbl, align=center] at (21.40, 3.70) {addr/wdata\\wstrb};
+
+\draw[sig] (22.55, 3.18) -- (22.55, 4.225);
+\draw[tick] (22.46, 3.58) -- (22.64, 3.82);
+\node[lbl, align=center] at (23.60, 3.70) {rdata/ready\\sbe/dbe};
 
 % ==============================================================================
-% 5. Nivel G: Pines Físicos Nexys A7-100T y Precarga de Firmware (Gris)
+% 5. Nivel G: Pines Físicos Nexys A7-100T y Backend / Precarga (Gris)
 % ==============================================================================
-\node[blk, fill=gray!35, minimum width=5.10cm, minimum height=0.84cm]
-  (pins_leds) at (8.85, 0.75)
+\node[blk, fill=gray!35, minimum width=3.70cm, minimum height=0.84cm]
+  (pins_leds) at (8.00, 0.75)
   {\textbf{LEDs Usuario [14:0]}\\\scriptsize Nexys A7 Pins H17--V12};
 
-\node[blk, fill=gray!35, minimum width=5.10cm, minimum height=0.84cm]
-  (pins_uart) at (15.00, 0.75)
+\node[blk, fill=gray!35, minimum width=4.00cm, minimum height=0.84cm]
+  (pins_uart) at (12.15, 0.75)
   {\textbf{USB-UART FT2232HQ}\\\scriptsize ser\_tx (D4) \quad|\quad ser\_rx (C4)};
 
-\node[blk, fill=gray!35, minimum width=5.25cm, minimum height=0.84cm]
-  (fw_init) at (20.95, 0.75)
-  {\textbf{build/firmware.hex}\\\scriptsize \$readmemh (Bootloader / Counter)};
+\node[blk, fill=gray!35, minimum width=4.45cm, minimum height=0.84cm]
+  (fw_init) at (16.675, 0.75)
+  {\textbf{build/firmware.hex (39b)}\\\scriptsize \$readmemh $\cdot$ makehex.py --ecc};
+
+\node[blk, fill=gray!35, minimum width=4.45cm, minimum height=0.84cm]
+  (dmem_backend) at (21.425, 0.75)
+  {\textbf{Backend Dual + crt0.S}\\\scriptsize RTL 39b bram\_sp | Vivado Soft ECC IP};
 
 \draw[sig] (leds_blk.south) -- (pins_leds.north);
-\draw[tick] (8.76, 1.36) -- (8.94, 1.60);
-\node[lbl] at (9.35, 1.48) {15b};
+\draw[tick] (7.91, 1.36) -- (8.09, 1.60);
+\node[lbl] at (8.45, 1.48) {15b};
 
-\draw[sig] (14.00, 1.78) -- (14.00, 1.17);
-\node[lbl] at (13.35, 1.48) {ser\_tx};
-\draw[sig] (16.00, 1.17) -- (16.00, 1.78);
-\node[lbl] at (16.65, 1.48) {ser\_rx};
+\draw[sig] (11.40, 1.78) -- (11.40, 1.17);
+\node[lbl] at (10.78, 1.48) {ser\_tx};
+\draw[sig] (12.90, 1.17) -- (12.90, 1.78);
+\node[lbl] at (13.52, 1.48) {ser\_rx};
 
-\draw[sig, dashed] (fw_init.north) -- (bram_blk.south);
-\node[lbl] at (21.38, 1.48) {Init};
+\draw[sig, dashed] (fw_init.north) -- (imem_blk.south);
+\node[lbl] at (17.85, 1.48) {Init (USE\_INIT=1)};
+
+\draw[sig, dashed] (dmem_backend.north) -- (dmem_blk.south);
+\node[lbl] at (22.45, 1.48) {USE\_INIT=0};
 
 \end{tikzpicture}
 \end{document}
