@@ -1,0 +1,291 @@
+\begin{tikzpicture}[
+  >= {Stealth[length=2.3mm, width=1.65mm]},
+  blk/.style={
+    draw=black,
+    line width=1.05pt,
+    rounded corners=4.5pt,
+    align=center,
+    text=black,
+    font=\footnotesize,
+    inner xsep=4pt,
+    inner ysep=3pt
+  },
+  subblk/.style={
+    draw=black,
+    line width=0.95pt,
+    rounded corners=3.5pt,
+    align=center,
+    text=black,
+    font=\footnotesize,
+    inner xsep=4pt,
+    inner ysep=2.5pt
+  },
+  container/.style={
+    draw=black,
+    line width=1.2pt,
+    rounded corners=6.5pt,
+    inner sep=0pt
+  },
+  sig/.style={
+    ->,
+    draw=black,
+    line width=0.95pt
+  },
+  bisig/.style={
+    <->,
+    draw=black,
+    line width=0.95pt
+  },
+  tick/.style={
+    draw=black,
+    line width=0.95pt
+  },
+  lbl/.style={
+    font=\scriptsize\bfseries,
+    text=black,
+    inner sep=1.5pt
+  },
+  wav/.style={
+    draw=black,
+    line width=1.05pt
+  },
+  busseg/.style={
+    draw=black,
+    line width=0.90pt,
+    align=center,
+    text=black,
+    font=\fontsize{5.8}{6.8}\selectfont
+  }
+]
+
+% ==============================================================================
+% 0. Cabecera
+% ==============================================================================
+\node[font=\huge\bfseries] at (12.50, 17.90)
+  {SHRV32 -- Interfaz y Diagrama Temporal DMEM ECC};
+
+% ==============================================================================
+% 1. Mitad Superior: Arquitectura de Interfaz y Backend Dual (y = 9.45 .. 17.25)
+% ==============================================================================
+
+% --- Etapa Izquierda: Bus Harvard y Telemetría (soc.v, x = 0.00 .. 5.75) ---
+\node[container, fill=gray!8, minimum width=5.75cm, minimum height=7.80cm]
+  (soc_if_box) at (2.875, 13.35) {};
+\node[font=\small\bfseries] at (2.875, 16.92)
+  {Bus Harvard \& Telemetría (soc.v)};
+
+\node[blk, fill=orange!62, minimum width=5.15cm, minimum height=1.65cm]
+  (dmem_dec_blk) at (2.875, 15.65)
+  {\textbf{Decodificador dmem\_sel \& W\^{}X}\\\fontsize{6.0}{7.3}\selectfont \texttt{dmem\_range}: \texttt{0x0000\_2000--3FFF} (8 KB)\\\fontsize{6.0}{7.3}\selectfont \texttt{dmem\_sel = mem\_valid \&\& dmem\_range \&\& !instr}\\\fontsize{6.0}{7.3}\selectfont \texttt{wstrb\_i = fault ? 4'b0 : mem\_wstrb}};
+
+\node[blk, fill=yellow!35, minimum width=5.15cm, minimum height=1.55cm]
+  (dmem_if_blk) at (2.875, 13.70)
+  {\textbf{Interfaz Nativa hacia dmem}\\\fontsize{6.0}{7.3}\selectfont \texttt{valid\_i, wstrb\_i, addr\_i, wdata\_i}\\\fontsize{6.0}{7.3}\selectfont $\leftarrow$ \texttt{rdata\_o[31:0], ready\_o}};
+
+\node[blk, fill=orange!62, minimum width=5.15cm, minimum height=1.50cm]
+  (dmem_tel_blk) at (2.875, 11.80)
+  {\textbf{Registros Telemetría ECC (MMIO R/O)}\\\fontsize{6.0}{7.3}\selectfont \texttt{dmem\_sbe} $\rightarrow$ \texttt{dmem\_sbu} (\texttt{0x3000\_0008})\\\fontsize{6.0}{7.3}\selectfont \texttt{dmem\_dbe} $\rightarrow$ \texttt{dmem\_dbu} (\texttt{0x3000\_000C})};
+
+\node[blk, fill=gray!35, minimum width=5.15cm, minimum height=0.86cm]
+  (dmem_trap_blk) at (2.875, 10.22)
+  {\textbf{Trap Fatal (ecc\_fault\_r $\rightarrow$ LED15)}\\\fontsize{6.0}{7.3}\selectfont \texttt{if (imem\_dbe || dmem\_dbe) ecc\_fault\_r <= 1}};
+
+\draw[sig] (dmem_dec_blk.south) -- (dmem_if_blk.north);
+\draw[sig] (dmem_tel_blk.south) -- (dmem_trap_blk.north);
+
+% --- Etapa Central: Controlador bram_ecc.v (x = 7.45 .. 16.05) ---
+\node[container, fill=gray!8, minimum width=8.60cm, minimum height=7.80cm]
+  (ctrl_ecc_box) at (11.75, 13.35) {};
+\node[font=\small] at (11.75, 16.92)
+  {\textbf{Controlador bram\_ecc.v} \scriptsize (5 Estados $\cdot$ RMW $\cdot$ Auto-Scrubbing)};
+
+\node[blk, fill=violet!32, minimum width=8.05cm, minimum height=2.92cm]
+  (fsm_blk) at (11.75, 15.05)
+  {\textbf{FSM Síncrona (state[2:0])}\\\fontsize{6.0}{7.3}\selectfont \textbf{ST\_IDLE (0):} \texttt{sw} (1c) $\rightarrow$ \texttt{ready\_o=1} | \texttt{lw} $\rightarrow$ \texttt{ST\_READ}\\\fontsize{6.0}{7.3}\selectfont \phantom{\textbf{ST\_IDLE (0):}} \texttt{sb/sh} parcial $\rightarrow$ \texttt{ST\_RMW\_READ}\\\fontsize{6.0}{7.3}\selectfont \textbf{ST\_READ (1):} \texttt{rdata\_o <= dec\_data}; \texttt{DBE} $\rightarrow$ \texttt{dbe\_o=1, ready\_o=1};\\\fontsize{6.0}{7.3}\selectfont \phantom{\textbf{ST\_READ (1):}} \texttt{SBE} $\rightarrow$ \texttt{sbe\_o=1, ST\_SCRUB}; limpio $\rightarrow$ \texttt{ready\_o=1}\\\fontsize{6.0}{7.3}\selectfont \textbf{ST\_SCRUB (2):} reescribe \texttt{scrub\_word\_q} (\texttt{bram\_we=1}) $\rightarrow$ \texttt{ready\_o=1}\\\fontsize{6.0}{7.3}\selectfont \textbf{ST\_RMW\_READ (3) $\rightarrow$ ST\_RMW\_WRITE (4):} captura \texttt{rmw\_base\_q}, aborta \texttt{DBE}};
+
+\node[blk, fill=blue!28, minimum width=3.90cm, minimum height=1.50cm]
+  (rmw_blk) at (9.675, 12.35)
+  {\textbf{Mezcla RMW (sb/sh)}\\\fontsize{6.0}{7.3}\selectfont \texttt{rmw\_merged\_data[31:0]}\\\fontsize{6.0}{7.3}\selectfont mezcla bytes por \texttt{wstrb\_q}\\\fontsize{6.0}{7.3}\selectfont sobre \texttt{rmw\_base\_q} saneado};
+
+\node[blk, fill=yellow!35, minimum width=3.90cm, minimum height=1.50cm]
+  (regs_blk) at (13.825, 12.35)
+  {\textbf{Registros Canal ECC}\\\fontsize{6.0}{7.3}\selectfont \texttt{rdata\_o[31:0]} (aísla camino)\\\fontsize{6.0}{7.3}\selectfont \texttt{scrub\_word\_q[38:0]=\{ecc,d\}}\\\fontsize{6.0}{7.3}\selectfont \texttt{addr\_q, wstrb\_q, wdata\_q}};
+
+\node[blk, fill=yellow!18, minimum width=8.05cm, minimum height=1.32cm]
+  (mux_blk) at (11.75, 10.42)
+  {\textbf{Mux Combinacional hacia BRAM (always @*)}\\\fontsize{6.0}{7.3}\selectfont Genera \texttt{bram\_en, bram\_we, bram\_addr[10:0], bram\_wdata[38:0]}\\\fontsize{6.0}{7.3}\selectfont Selecciona origen: \texttt{enc\_word} (\texttt{sw}/RMW) o \texttt{scrub\_word\_q} (\texttt{ST\_SCRUB})};
+
+\draw[bisig] (9.675, 13.59) -- (rmw_blk.north);
+\draw[bisig] (13.825, 13.59) -- (regs_blk.north);
+\draw[sig] (rmw_blk.south) -- (9.675, 11.08);
+\draw[sig] (regs_blk.south) -- (13.825, 11.08);
+
+% --- Etapa Derecha: Backend Dual de Memoria Física (x = 17.65 .. 25.00) ---
+\node[container, fill=gray!8, minimum width=7.35cm, minimum height=7.80cm]
+  (backend_box) at (21.325, 13.35) {};
+\node[font=\small] at (21.325, 16.92)
+  {\textbf{Backend Dual} \scriptsize (\texttt{generate} $\cdot$ \texttt{VIVADO\_ECC\_IP})};
+
+\node[blk, fill=green!42, minimum width=6.80cm, minimum height=2.90cm]
+  (rama_a_blk) at (21.325, 15.00)
+  {\textbf{Rama A: RTL Portable (Sim / openXC7 / PolarFire)}\\\fontsize{6.0}{7.3}\selectfont \textbf{1. ecc\_secded\_enc:} Hsiao (39,32), 13--14 XOR/fila (0$\rightarrow$0)\\\fontsize{6.0}{7.3}\selectfont \textbf{2. bram\_sp (2048$\times$39b):} \texttt{BYTE\_WRITE=0}, \texttt{USE\_INIT=0}\\\fontsize{6.0}{7.3}\selectfont \phantom{\textbf{2. bram\_sp:}} 2$\times$\texttt{RAMB36E1} + 1$\times$\texttt{RAMB18E1} (Artix-7)\\\fontsize{6.0}{7.3}\selectfont \textbf{3. ecc\_secded\_dec:} síndrome 7b $\rightarrow$ \texttt{dec\_data, dec\_ecc, sbe/dbe}};
+
+\node[blk, fill=green!42, minimum width=6.80cm, minimum height=3.20cm]
+  (rama_b_blk) at (21.325, 11.35)
+  {\textbf{Rama B: IP Vivado (sources\_1 con VIVADO\_ECC\_IP=1)}\\\fontsize{6.0}{7.3}\selectfont \textbf{blk\_mem\_gen\_dmem\_ecc} (Simple Dual-Port, 2048$\times$32b)\\\fontsize{6.0}{7.3}\selectfont \texttt{CONFIG.ECC \{false\}}, \texttt{ecctype \{Soft\_ECC\}}, \texttt{softecc \{true\}}\\\fontsize{6.0}{7.3}\selectfont Puerto A (Write): \texttt{ena = bram\_en \&\& bram\_we, wea, addra, dina}\\\fontsize{6.0}{7.3}\selectfont Puerto B (Read): \texttt{enb = bram\_en \&\& !bram\_we, addrb, doutb}\\\fontsize{6.0}{7.3}\selectfont Banderas: \texttt{.sbiterr(dec\_sbiterr), .dbiterr(dec\_dbiterr)}};
+
+% --- Conexiones entre Etapas Superiores (corredores de 1.70 y 1.60 cm, cero cruces) ---
+\draw[sig] (dmem_if_blk.east |- 0,14.32) -- (fsm_blk.west |- 0,14.32);
+\node[lbl, align=center] at (6.60, 14.68) {\fontsize{5.6}{6.6}\selectfont valid, wstrb\\addr, wdata};
+
+\draw[sig] (fsm_blk.west |- 0,13.94) -- (dmem_if_blk.east |- 0,13.94);
+\node[lbl, align=center] at (6.46, 13.56) {\fontsize{5.6}{6.6}\selectfont rdata\_o\\ready\_o};
+
+\draw[sig] (8.00, 13.59) -- (8.00, 13.22) -- (7.02, 13.22) -- (7.02, 11.80) -- (dmem_tel_blk.east);
+\node[lbl, align=center] at (6.38, 12.48) {\fontsize{5.6}{6.6}\selectfont sbe\_o\\dbe\_o};
+
+\draw[sig] (backend_box.west |- 0,15.05) -- (fsm_blk.east |- 0,15.05);
+\node[lbl, align=center] at (16.85, 15.42) {\fontsize{5.6}{6.6}\selectfont dec\_data\\sbe / dbe};
+
+\draw[sig] (mux_blk.east) -- (backend_box.west |- 0,10.42);
+\node[lbl, align=center] at (16.85, 10.82) {\fontsize{5.6}{6.6}\selectfont en, we\\addr, wdata};
+
+% ==============================================================================
+% 2. Mitad Inferior: Diagrama Temporal Ciclo a Ciclo (17 Ciclos, C0 .. C16)
+% ==============================================================================
+\node[container, fill=gray!8, minimum width=25.00cm, minimum height=8.75cm]
+  (wave_box) at (12.50, 4.675) {};
+\node[font=\small] at (12.50, 8.72)
+  {\textbf{Diagrama Temporal Ciclo a Ciclo -- Operaciones de dmem: bram\_ecc} \scriptsize (\texttt{C0..C16} $\cdot$ \texttt{dx = 1 ciclo clk})};
+
+% --- Rejilla vertical (x_k = 4.00 + k * 1.20) ---
+\foreach \k in {0,...,17} {
+  \draw[dashed, gray!55, line width=0.55pt] ({4.00 + \k*1.20}, 0.48) -- ({4.00 + \k*1.20}, 8.40);
+}
+
+% --- Banners de Transacción ---
+\node[subblk, fill=green!30, minimum width=2.34cm, minimum height=0.40cm, font=\fontsize{6.2}{7.2}\selectfont\bfseries]
+  at (5.20, 8.18) {1. sw (1c)};
+\node[subblk, fill=blue!22, minimum width=3.54cm, minimum height=0.40cm, font=\fontsize{6.2}{7.2}\selectfont\bfseries]
+  at (8.20, 8.18) {2. lw Limpio (2c)};
+\node[subblk, fill=orange!45, minimum width=4.74cm, minimum height=0.40cm, font=\fontsize{6.2}{7.2}\selectfont\bfseries]
+  at (12.40, 8.18) {3. lw + SBE + Scrub (3c)};
+\node[subblk, fill=yellow!42, minimum width=4.74cm, minimum height=0.40cm, font=\fontsize{6.2}{7.2}\selectfont\bfseries]
+  at (17.20, 8.18) {4. sb/sh RMW (3c)};
+\node[subblk, fill=red!24, minimum width=4.74cm, minimum height=0.40cm, font=\fontsize{6.2}{7.2}\selectfont\bfseries]
+  at (22.00, 8.18) {5. Error Doble DBE (Fatal)};
+
+% --- Etiquetas de Ciclo C0 .. C16 ---
+\foreach \k in {0,...,16} {
+  \node[lbl] at ({4.60 + \k*1.20}, 7.74) {C\k};
+}
+
+% --- Etiquetas de Señales (Columna Izquierda) ---
+\node[lbl, anchor=east] at (3.82, 7.18) {clk};
+\node[lbl, anchor=east] at (3.82, 6.54) {valid\_i (dmem\_sel)};
+\node[lbl, anchor=east] at (3.82, 5.90) {wstrb\_i[3:0]};
+\node[lbl, anchor=east] at (3.82, 5.24) {state[2:0]};
+\node[lbl, anchor=east] at (3.82, 4.58) {bram\_en};
+\node[lbl, anchor=east] at (3.82, 3.94) {bram\_we};
+\node[lbl, anchor=east] at (3.82, 3.28) {rdata\_o[31:0]};
+\node[lbl, anchor=east] at (3.82, 2.62) {ready\_o};
+\node[lbl, anchor=east] at (3.82, 1.98) {sbe\_o};
+\node[lbl, anchor=east] at (3.82, 1.34) {dbe\_o};
+\node[lbl, anchor=east] at (3.82, 0.72) {ecc\_fault\_r / trap};
+
+% --- Fila 1: clk (y = 7.02 .. 7.34) ---
+\draw[wav] (3.92, 7.02) -- (4.00, 7.02);
+\foreach \k in {0,...,16} {
+  \draw[wav] ({4.00 + \k*1.20}, 7.02) -- ({4.00 + \k*1.20}, 7.34) -- ({4.60 + \k*1.20}, 7.34) -- ({4.60 + \k*1.20}, 7.02) -- ({5.20 + \k*1.20}, 7.02);
+}
+
+% --- Fila 2: valid_i (y = 6.38 .. 6.70) ---
+\fill[blue!12] (4.00, 6.38) rectangle (23.20, 6.70);
+\draw[wav] (3.92, 6.38) -- (4.00, 6.38) -- (4.00, 6.70) -- (23.20, 6.70) -- (23.20, 6.38) -- (24.40, 6.38);
+\draw[wav] (6.40, 6.38) -- (6.40, 6.70);
+\draw[wav] (10.00, 6.38) -- (10.00, 6.70);
+\draw[wav] (14.80, 6.38) -- (14.80, 6.70);
+\draw[wav] (19.60, 6.38) -- (19.60, 6.70);
+
+% --- Fila 3: wstrb_i[3:0] (y = 5.72 .. 6.08) ---
+\draw[busseg, fill=green!18]  (4.00, 5.72) rectangle (6.40, 6.08)  node[pos=.5] {\texttt{4'hF (sw)}};
+\draw[busseg, fill=blue!14]   (6.40, 5.72) rectangle (10.00, 6.08) node[pos=.5] {\texttt{4'h0 (lw)}};
+\draw[busseg, fill=orange!20] (10.00, 5.72) rectangle (14.80, 6.08) node[pos=.5] {\texttt{4'h0 (lw)}};
+\draw[busseg, fill=yellow!25] (14.80, 5.72) rectangle (19.60, 6.08) node[pos=.5] {\texttt{4'h1 (sb RMW)}};
+\draw[busseg, fill=red!16]    (19.60, 5.72) rectangle (23.20, 6.08) node[pos=.5] {\texttt{4'h0 / 4'h1}};
+\draw[busseg, fill=gray!25]   (23.20, 5.72) rectangle (24.40, 6.08) node[pos=.5] {\texttt{masked}};
+
+% --- Fila 4: state[2:0] (y = 5.04 .. 5.44) ---
+\draw[busseg, fill=violet!18] (4.00, 5.04) rectangle (5.20, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (5.20, 5.04) rectangle (6.40, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (6.40, 5.04) rectangle (7.60, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=blue!24]   (7.60, 5.04) rectangle (8.80, 5.44) node[pos=.5] {READ};
+\draw[busseg, fill=violet!18] (8.80, 5.04) rectangle (10.00, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (10.00, 5.04) rectangle (11.20, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=blue!24]   (11.20, 5.04) rectangle (12.40, 5.44) node[pos=.5] {READ};
+\draw[busseg, fill=orange!48] (12.40, 5.04) rectangle (13.60, 5.44) node[pos=.5] {\textbf{SCRUB}};
+\draw[busseg, fill=violet!18] (13.60, 5.04) rectangle (14.80, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (14.80, 5.04) rectangle (16.00, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=yellow!35] (16.00, 5.04) rectangle (17.20, 5.44) node[pos=.5] {RMW\_RD};
+\draw[busseg, fill=yellow!55] (17.20, 5.04) rectangle (18.40, 5.44) node[pos=.5] {RMW\_WR};
+\draw[busseg, fill=violet!18] (18.40, 5.04) rectangle (19.60, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (19.60, 5.04) rectangle (20.80, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=red!22]    (20.80, 5.04) rectangle (22.00, 5.44) node[pos=.5] {READ};
+\draw[busseg, fill=violet!18] (22.00, 5.04) rectangle (23.20, 5.44) node[pos=.5] {IDLE};
+\draw[busseg, fill=violet!18] (23.20, 5.04) rectangle (24.40, 5.44) node[pos=.5] {IDLE};
+
+% --- Fila 5: bram_en (y = 4.42 .. 4.74) ---
+\foreach \xstart in {4.00, 6.40, 10.00, 12.40, 14.80, 17.20, 19.60} {
+  \fill[blue!14] (\xstart, 4.42) rectangle ({\xstart + 1.20}, 4.74);
+}
+\draw[wav] (3.92, 4.42) -- (4.00, 4.42) -- (4.00, 4.74) -- (5.20, 4.74) -- (5.20, 4.42) --
+  (6.40, 4.42) -- (6.40, 4.74) -- (7.60, 4.74) -- (7.60, 4.42) --
+  (10.00, 4.42) -- (10.00, 4.74) -- (11.20, 4.74) -- (11.20, 4.42) --
+  (12.40, 4.42) -- (12.40, 4.74) -- (13.60, 4.74) -- (13.60, 4.42) --
+  (14.80, 4.42) -- (14.80, 4.74) -- (16.00, 4.74) -- (16.00, 4.42) --
+  (17.20, 4.42) -- (17.20, 4.74) -- (18.40, 4.74) -- (18.40, 4.42) --
+  (19.60, 4.42) -- (19.60, 4.74) -- (20.80, 4.74) -- (20.80, 4.42) -- (24.40, 4.42);
+
+% --- Fila 6: bram_we (y = 3.78 .. 4.10) ---
+\fill[green!24]  (4.00, 3.78) rectangle (5.20, 4.10);
+\fill[orange!36] (12.40, 3.78) rectangle (13.60, 4.10);
+\fill[yellow!45] (17.20, 3.78) rectangle (18.40, 4.10);
+\draw[wav] (3.92, 3.78) -- (4.00, 3.78) -- (4.00, 4.10) -- (5.20, 4.10) -- (5.20, 3.78) --
+  (12.40, 3.78) -- (12.40, 4.10) -- (13.60, 4.10) -- (13.60, 3.78) --
+  (17.20, 3.78) -- (17.20, 4.10) -- (18.40, 4.10) -- (18.40, 3.78) -- (24.40, 3.78);
+\node[font=\fontsize{5.6}{6.5}\selectfont\bfseries] at (13.00, 3.94) {SCRUB};
+\node[font=\fontsize{5.6}{6.5}\selectfont\bfseries] at (17.80, 3.94) {RMW};
+\node[font=\fontsize{5.6}{6.5}\selectfont, text=red!70!black] at (22.60, 3.96) {(abort si RMW)};
+
+% --- Fila 7: rdata_o[31:0] (y = 3.10 .. 3.46) ---
+\draw[busseg, fill=gray!18]   (4.00, 3.10) rectangle (8.80, 3.46)  node[pos=.5] {---};
+\draw[busseg, fill=blue!16]   (8.80, 3.10) rectangle (12.40, 3.46) node[pos=.5] {\texttt{DATA\_OK (lw)}};
+\draw[busseg, fill=orange!24] (12.40, 3.10) rectangle (22.00, 3.46) node[pos=.5] {\texttt{CORR\_SBE} (dato reparado en C6$\rightarrow$C7)};
+\draw[busseg, fill=red!20]    (22.00, 3.10) rectangle (24.40, 3.46) node[pos=.5] {\texttt{ERR (DBE)}};
+
+% --- Fila 8: ready_o (y = 2.46 .. 2.78) ---
+\foreach \xstart in {5.20, 8.80, 13.60, 18.40, 22.00} {
+  \fill[green!32] (\xstart, 2.46) rectangle ({\xstart + 1.20}, 2.78);
+}
+\draw[wav] (3.92, 2.46) -- (5.20, 2.46) -- (5.20, 2.78) -- (6.40, 2.78) -- (6.40, 2.46) --
+  (8.80, 2.46) -- (8.80, 2.78) -- (10.00, 2.78) -- (10.00, 2.46) --
+  (13.60, 2.46) -- (13.60, 2.78) -- (14.80, 2.78) -- (14.80, 2.46) --
+  (18.40, 2.46) -- (18.40, 2.78) -- (19.60, 2.78) -- (19.60, 2.46) --
+  (22.00, 2.46) -- (22.00, 2.78) -- (23.20, 2.78) -- (23.20, 2.46) -- (24.40, 2.46);
+
+% --- Fila 9: sbe_o (y = 1.82 .. 2.14) ---
+\fill[orange!45] (12.40, 1.82) rectangle (13.60, 2.14);
+\draw[wav] (3.92, 1.82) -- (12.40, 1.82) -- (12.40, 2.14) -- (13.60, 2.14) -- (13.60, 1.82) -- (24.40, 1.82);
+\node[font=\fontsize{5.6}{6.5}\selectfont\bfseries] at (13.00, 1.98) {+SBU};
+
+% --- Fila 10: dbe_o (y = 1.18 .. 1.50) ---
+\fill[red!30] (22.00, 1.18) rectangle (23.20, 1.50);
+\draw[wav] (3.92, 1.18) -- (22.00, 1.18) -- (22.00, 1.50) -- (23.20, 1.50) -- (23.20, 1.18) -- (24.40, 1.18);
+\node[font=\fontsize{5.6}{6.5}\selectfont\bfseries] at (22.60, 1.34) {+DBU};
+
+% --- Fila 11: ecc_fault_r / trap (y = 0.56 .. 0.88) ---
+\fill[red!35] (23.20, 0.56) rectangle (24.40, 0.88);
+\draw[wav] (3.92, 0.56) -- (23.20, 0.56) -- (23.20, 0.88) -- (24.40, 0.88);
+\node[font=\fontsize{5.6}{6.5}\selectfont\bfseries, text=red!70!black] at (23.80, 0.72) {LED15};
+
+\end{tikzpicture}
