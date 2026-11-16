@@ -221,3 +221,70 @@ Flujo ejecutado con `make synth SYNTH=openxc7` (`Yosys 0.69` + `nextpnr-xilinx` 
 - **Sobrecoste mínimo en lógica:** los `+3` flip-flops adicionales corresponden exactamente a los registros de decodificación de respuesta (`imem_read_r`, `dmem_read_r`) y al *latch* de fallo Harvard (`harv_fault_r`).
 - **Camino crítico:** continúa acotado dentro de PicoRV32 (`cpu.latched_branch` $\rightarrow$ `next_reg_next_pc[31:0][26]`) con `2.40 ns` de *slack* positivo frente al requisito de `10.00 ns` (`100 MHz`).
 - **Nota pendiente (Fase 2 ECC):** los comentarios iniciales de [`bram_sp.v`](../rtl/mem/bram_sp.v) todavía mencionan `16 KB (4096 palabras)`; conviene actualizarlos al introducir el controlador ECC de memoria.
+
+---
+
+## [2026-11-16] — Hito 2: Protección ECC SEC-DED en registros y memorias Harvard (`feature/ecc-mem`)
+
+### Objetivo
+Endurecer los elementos de almacenamiento del SoC (**banco de registros `cpuregs`**, **IMEM de 8 KB** y **DMEM de 8 KB**) frente a *Single Event Upsets* (SEU) mediante códigos **SEC-DED (39,32)** con **auto-scrubbing** hardware de errores simples (`SBE`), parada segura (`trap`) ante errores dobles incorregibles (`DBE`), soporte *Read-Modify-Write* (`RMW`) para escrituras parciales (`sb`/`sh`) y telemetría dedicada por CSR y MMIO, manteniendo compatibilidad dual entre el flujo RTL portable (`iverilog`, `Verilator`, `openXC7`, PolarFire) y la IP oficial **Block Memory Generator (`blk_mem_gen` v8.4)** con *Soft ECC* en Vivado.
+
+### Arquitectura y cambios implementados
+
+1. **Códec combinacional Hsiao SEC-DED (39,32) ([`ecc_secded.v`](../rtl/core/ecc_secded.v)):**
+   - Matriz de paridad **Hsiao (39,32)** sistemática (`[38:32]` paridad + `[31:0]` datos) con ecuaciones balanceadas de 13–14 entradas XOR por fila (`HSIAO_P0..P6`), reduciendo la profundidad lógica frente a Hamming clásico.
+   - Cada columna de datos tiene peso impar exacto (`3` unos), garantizando que la palabra nula `32'h0000_0000` codifique a `39'h0` (estado inicial válido tras *reset-to-zero* en FPGA sin falsos errores).
+   - `ecc_secded_dec` reutiliza `ecc_secded_enc` para calcular el síndrome de 7 bits (`sbiterr_o` si síndrome $\neq 0$ con peso impar; `dbiterr_o` si síndrome $\neq 0$ con peso par) y corrige tanto los 32 bits de datos (`data_o`) como los 7 bits de paridad (`ecc_o`) para permitir *auto-scrubbing* completo.
+
+2. **Banco de registros `cpuregs` de 39 bits con *auto-scrubbing* oportunista ([`picorv32.v`](../rtl/core/picorv32.v)):**
+   - Ampliación de `cpuregs` a `32 × 39` bits bajo `ENABLE_ECC = 1`, preservando un único puerto de escritura síncrono y dos puertos de lectura asíncronos para seguir infiriendo **LUTRAM (`14 × RAM32M`)** en lugar de flip-flops.
+   - Un codificador `u_enc_cpuregs` en la ruta de *write-back* y dos decodificadores combinacionales (`u_dec_rs1`, `u_dec_rs2`) en las salidas de lectura.
+   - **Auto-scrubbing en 1 ciclo sin penalización de CPI:** cuando la CPU no escribe en `rd` (`!cpuregs_cpu_wen`), si `rs1` o `rs2` presentan `sbiterr`, se reescribe la palabra reparada de 39 bits (`{cpuregs_ecc_fix, cpuregs_rs_dec}`) en el mismo flanco de reloj (`cpuregs_scrub1` con prioridad sobre `cpuregs_scrub2`).
+   - **Supresión de falsos *traps* en lecturas especulativas:** `reg_dbe_event` cualifica los errores dobles con el uso real de `rs1` (`reg_uses_rs1`) y `rs2` (`reg_uses_rs2`) según el tipo de instrucción en `cpu_state_ld_rs1`, evitando *traps* espurios cuando instrucciones tipo I/U/J/CSR decodifican campos `rs1`/`rs2` que no son registros fuente.
+   - **Telemetría CSR:** nuevos contadores de solo lectura `CSR_ECC_REG_SBU` (`0xCC2`) y `CSR_ECC_REG_DBU` (`0xCC3`), más transición directa a `cpu_state_trap` ante `reg_dbe_event`.
+
+3. **Controlador ECC de memoria BRAM con *scrubbing*, RMW y backend dual ([`bram_ecc.v`](../rtl/mem/bram_ecc.v), [`bram_sp.v`](../rtl/mem/bram_sp.v)):**
+   - Parametrización de [`bram_sp.v`](../rtl/mem/bram_sp.v) con `DATA_WIDTH` (`32`/`39`), `BYTE_WRITE` (`0` = escritura atómica de palabra completa) e inicialización a cero en simulación (`gen_zero_init` cuando `USE_INIT = 0`) para alinear simuladores de 4 estados (`iverilog`) con el arranque físico de las BRAM en FPGA.
+   - Máquina de estados en [`bram_ecc.v`](../rtl/mem/bram_ecc.v) (`ST_IDLE`, `ST_READ`, `ST_SCRUB`, `ST_RMW_READ`, `ST_RMW_WRITE`) con registro de salida `rdata_o` que corta la ruta combinacional entre la BRAM, el decodificador ECC y el núcleo:
+     - `sw` (`wstrb = 4'b1111`): codificación y escritura directa en **1 ciclo**.
+     - `lw` (`wstrb = 4'b0000`): lectura síncrona + decodificación y registro en **2 ciclos** (**3 ciclos** si detecta `SBE` y ejecuta `ST_SCRUB` reescribiendo `scrub_word_q`). En `IMEM` (`READ_ONLY = 1'b1`), las escrituras desde el bus quedan bloqueadas, pero `ST_SCRUB` sí repara internamente la BRAM ante un `SBE`.
+     - `sb`/`sh` parciales (`0 < wstrb < 4'b1111`): secuencia *Read-Modify-Write* de **3 ciclos** (`ST_RMW_READ` $\rightarrow$ `ST_RMW_WRITE`), reparando al vuelo cualquier `SBE` previo en la palabra base antes de mezclar los bytes nuevos, y **abortando la escritura** si detecta un `DBE` previo para no enmascarar corrupción con paridad nueva válida.
+   - **Backend dual (`VIVADO_ECC_IP`):**
+     - Por defecto (`iverilog`, `Verilator`, `openXC7`, `sim_1` en Vivado y banco `imem`): usa `bram_sp` de 39 bits + `ecc_secded_enc`/`ecc_secded_dec`.
+     - En síntesis de Vivado (`sources_1` con `VIVADO_ECC_IP=1` en [`create_project.tcl`](../fpga/nexys_a7/create_project.tcl)): `dmem` instancia la IP oficial `blk_mem_gen_dmem_ecc` (*Simple Dual-Port RAM*, `2048 × 32`, `CONFIG.ECC {false}`, `CONFIG.ecctype {Soft_ECC}`, `CONFIG.softecc {true}` $\rightarrow$ `C_USE_SOFTECC = 1, C_USE_ECC = 0`), manteniendo nuestra FSM de RMW y *auto-scrubbing* por encima de la IP.
+
+4. **Integración en [`soc.v`](../rtl/top/soc.v) y toolchain de firmware ([`makehex.py`](../sw/common/makehex.py), [`io.h`](../sw/common/io.h), [`main.c`](../sw/apps/counter/main.c)):**
+   - Generación de imágenes de 39 bits (`10` dígitos hexadecimales por línea) mediante `python3 common/makehex.py ... 2048 --ecc` en [`sw/Makefile`](../sw/Makefile).
+   - Contadores MMIO de telemetría de memoria en `0x3000_0000..0x3000_000C` (`REG_ECC_IMEM_SBU`, `REG_ECC_IMEM_DBU`, `REG_ECC_DMEM_SBU`, `REG_ECC_DMEM_DBU`), bloqueo de escrituras y activación de `ecc_fault_r` ($\rightarrow$ `trap`) ante cualquier `DBE` en IMEM o DMEM.
+   - Ampliación del latido UART en [`main.c`](../sw/apps/counter/main.c) (`counter.elf`: `904` B `.text` con `SIM_FAST=0`, `900` B con `SIM_FAST=1`, más `4` B `.data` y `4` B `.bss`) ejercitando variables en `.data`/`.bss` con accesos `lw`/`sw` y `sb` (RMW) e imprimiendo `PC`, `CTRL`, `SBU`, `DBU`, `ISBU`, `IDBU`, `DSBU` y `DDBU`.
+
+### Verificación en simulación y linting
+- **Verilator (`make lint`):** `0` errores y `0` avisos bloqueantes tanto en modo RTL por defecto como con `-DVIVADO_ECC_IP=1` (usando *stub* de `blk_mem_gen_dmem_ecc`).
+- **Test unitario del códec ([`tb_ecc_secded.v`](../tb/tb_ecc_secded.v)):** **5468/5468** comprobaciones superadas en `iverilog` (palabra nula `32'h0 -> 39'h0` + 7 patrones $\times$ `[1 nominal + 39 SBE + 741 DBE]`).
+- **Test unitario del controlador BRAM ECC ([`tb_bram_ecc.v`](../tb/tb_bram_ecc.v)):** **6/6** pruebas superadas en `iverilog` y `Verilator` (`sw` 1c / `lw` 2c, `sb`/`sh` RMW 3c incluyendo palabra virgen a `0`, *auto-scrubbing* de SBE en dato y paridad, RMW sobre palabra con SBE previo, detección de DBE + aborto seguro de RMW, y bloqueo de escritura externa con *scrubbing* interno en `READ_ONLY=1`).
+- **Test integral del SoC ([`tb_soc.v`](../tb/tb_soc.v)):** campaña completa superada (`make sw SIM_FAST=1`) en `Verilator` (`2.513 s` *walltime* sin traza) e `iverilog`:
+  - Fase 1 (recuperable): 7 inyecciones TMR (`PC=3`, `CTRL=4`) + 3 SBE en `cpuregs` (`SBU=3`) + prueba de bloqueo de falso positivo en `rs2` especulativo (`x18`) + 2 SBE en IMEM (`ISBU=2`) + 2 SBE en DMEM (`DSBU=2`), verificando *auto-scrubbing* y lectura exacta por UART en `[SHRV32 Latido] Contador = 1` (`PC=00000003 CTRL=00000004 SBU=00000003 DBU=00000000 ISBU=00000002 IDBU=00000000 DSBU=00000002 DDBU=00000000`).
+  - Fase 2 (errores dobles fatales, tras `LEDs = 0x0020`): inyección secuencial con *reset* entre pruebas de DBE en `cpuregs[x8]`, DBE en IMEM y DBE en DMEM, confirmando `trap = 1` inmediato (`count_ecc_reg_dbu=1`, `imem_dbu=1`, `dmem_dbu=1`) en los 3 casos.
+
+### Métricas de implementación Post-Route (`xc7a100tcsg324-1` @ 100 MHz)
+
+Comparativa de las tres implementaciones cerradas en el Hito 2 frente al Hito 1 (TMR sin ECC):
+1. **Vivado RTL (100 % Verilog portable):** Hsiao RTL en `cpuregs`, `imem` y `dmem`.
+2. **Vivado + IP Soft ECC (`VIVADO_ECC_IP=1`):** Hsiao RTL en `cpuregs` e `imem`, e IP `blk_mem_gen_dmem_ecc` en `dmem`.
+3. **`openXC7` (`SYNTH=openxc7`):** flujo libre completo (`Yosys 0.69` + `nextpnr-xilinx`) sobre el RTL 100 % portable, validado también en placa física.
+
+| Recurso / Métrica | Hito 1 (TMR) | Hito 2 Vivado (RTL puro) | Hito 2 Vivado (IP Soft ECC) | Hito 2 `openXC7` (RTL puro) |
+| --- | ---: | ---: | ---: | ---: |
+| **Slice LUTs (Vivado) / `SLICE_LUTX` (`nextpnr`)** | `1429` (`2.25 %`) | `2135` (`3.37 %` · `+706`) | `2111` (`3.33 %` · `+682`) | `3886 / 126800` (`3 %` · `2580` LUTs Yosys) |
+| **LUT as Logic / LUT as Distributed RAM** | `1385` / `44` | `2079` / `56` | `2055` / `56` | `2580` / `14 RAM32M` |
+| **Slice Registers (FF)** | `936` (`0.74 %`) | `1375` (`1.08 %` · `+439`) | `1368` (`1.08 %` · `+432`) | `1360` (`1 %` · `1349 FDRE` + `11 FDSE`, `+439` vs. Harvard) |
+| **Block RAM Tiles (`RAMB36` eq.)** | `4` (`4 RAMB36E1`) | `5` (`4 RAMB36E1` + `2 RAMB18E1`) | `5` (`4 RAMB36E1` + `2 RAMB18E1`) | `5` eq. (`10 RAMB18E1` / `270`, `3 %`) |
+| **Carry Chains (`CARRY4`)** | — (`126` `openXC7`) | `159` | `159` | `179` (`176` Yosys) |
+| **WNS Setup @ 100 MHz** | `+2.298 ns` | `+0.226 ns` (`0` fallos) | `+0.240 ns` (`0` fallos) | `+0.40 ns` (`PASS`) |
+| **WHS Hold @ 100 MHz** | `+0.110 ns` | `+0.033 ns` (`0` fallos) | `+0.061 ns` (`0` fallos) | `PASS` |
+| **$F_{\max}$ estimada (`clk`)** | $\approx 129.8\text{ MHz}$ | $\approx 102.3\text{ MHz}$ | $\approx 102.5\text{ MHz}$ | `104.13 MHz` |
+
+### Observaciones técnicas
+- **Coste de área del endurecimiento ECC:** proteger `cpuregs`, `imem` y `dmem` añade `~682–706` Slice LUTs, `+432–439` FFs y solo **`+1` Block RAM Tile** (`5` tiles en total frente a `4`, pasando cada banco de `2048 × 32` a `2048 × 39` bits con `2 RAMB36E1 + 1 RAMB18E1`), más `+2` primitivas `RAM32M` (`14` en total) para almacenar los 7 bits extra de paridad en el banco de registros sin perder inferencia de LUTRAM.
+- **Resolución del DRC `MDRV-1` en `blk_mem_gen_dmem_ecc`:** activar simultáneamente `CONFIG.ECC {true}` y `CONFIG.softecc {true}` en Tcl encendía a la vez `C_USE_ECC = 1` (ECC *hard* de primitiva `RAMB36E1` en modo `512 × 64`, forzando 4 bancos en profundidad y el mux `has_mux_b.B`) y `C_USE_SOFTECC = 1` (ECC *soft* en LUTs), generando doble driver sobre `sbiterr` y `dbiterr`. Fijar `CONFIG.ECC {false}` junto a `CONFIG.ecctype {Soft_ECC}` y `CONFIG.softecc {true}` selecciona exclusivamente el modo *Soft ECC* (`C_USE_ECC = 0, C_USE_SOFTECC = 1`), reduciendo DMEM a `2 RAMB36E1 + 1 RAMB18E1` y eliminando por completo el conflicto DRC.
+- **Camino crítico a 100 MHz (`WNS = +0.240 ns`):** la ruta crítica ya no pasa por las memorias BRAM (aisladas por el registro `rdata_o` de `bram_ecc`), sino por la lectura asíncrona en LUTRAM de `cpuregs` + decodificación combinacional Hsiao (`u_dec_rs1`/`u_dec_rs2`) + lógica de detección/votación TMR (`9.611 ns` en Vivado con IP; `9.772 ns` en Vivado RTL; `9.60 ns` en `openXC7`). Los tres flujos cierran *timing* a `100.000 MHz` sin violaciones.
