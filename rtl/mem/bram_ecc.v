@@ -37,19 +37,87 @@ module bram_ecc #(
   reg  [         31:0] rmw_base_q;  // Palabra previa ya decodificada para mezcla RMW
   reg  [         38:0] scrub_word_q;  // Palabra de 39b reparada para reescribir en ST_SCRUB
 
-  // Señales combinacionales hacia la BRAM física single-port de 39 bits
+    // Señales combinacionales hacia memoria (BRAM RTL de 39b o IP Vivado de 32b+ECC)
   reg                  bram_en;
   reg                  bram_we;
   reg  [ADDR_BITS-1:0] bram_addr;
   reg  [         38:0] bram_wdata;
   wire [         38:0] bram_rdata;
+  wire [         38:0] enc_word;
 
-  // Decodificador combinacional permanente sobre la salida registrada de la BRAM
-  wire [         31:0] dec_data;
-  wire [          6:0] dec_ecc;
-  wire                 dec_sbiterr;
-  wire                 dec_dbiterr;
+  // Mezcla combinacional por bytes para sb/sh (compartida por backend RTL y Vivado IP)
+  wire [31:0] rmw_merged_data = {
+      wstrb_q[3] ? wdata_q[31:24] : rmw_base_q[31:24],
+      wstrb_q[2] ? wdata_q[23:16] : rmw_base_q[23:16],
+      wstrb_q[1] ? wdata_q[15:8]  : rmw_base_q[15:8],
+      wstrb_q[0] ? wdata_q[7:0]   : rmw_base_q[7:0]
+  };
+  wire [31:0] enc_data_in = (state == ST_RMW_WRITE) ? rmw_merged_data : wdata_i;
 
+  wire [31:0] dec_data;
+  wire [ 6:0] dec_ecc;
+  wire        dec_sbiterr;
+  wire        dec_dbiterr;
+
+  // En síntesis Vivado (VIVADO_ECC_IP), DMEM usa blk_mem_gen con Soft ECC; IMEM y sim usan RTL
+`ifdef VIVADO_ECC_IP
+  generate
+    if (!READ_ONLY && (WORDS == 2048) && (ADDR_BITS == 11)) begin : gen_vivado_soft_ecc
+      wire [31:0] ip_dina = (state == ST_SCRUB) ? scrub_word_q[31:0] : enc_data_in;
+      wire        ip_wea  = bram_en && bram_we;
+      wire        ip_enb  = bram_en && !bram_we;
+
+      blk_mem_gen_dmem_ecc u_ip (
+          .clka     (clk),
+          .ena      (ip_wea),
+          .wea      (ip_wea),
+          .addra    (bram_addr),
+          .dina     (ip_dina),
+          .clkb     (clk),
+          .enb      (ip_enb),
+          .addrb    (bram_addr),
+          .doutb    (dec_data),
+          .sbiterr  (dec_sbiterr),
+          .dbiterr  (dec_dbiterr),
+          .rdaddrecc()
+      );
+
+      assign bram_rdata = 39'h0;
+      assign enc_word   = {7'h0, enc_data_in};
+      assign dec_ecc    = 7'h0;
+    end else begin : gen_rtl_ecc
+      ecc_secded_dec u_dec (
+          .encoded_i(bram_rdata),
+          .data_o   (dec_data),
+          .ecc_o    (dec_ecc),
+          .sbiterr_o(dec_sbiterr),
+          .dbiterr_o(dec_dbiterr)
+      );
+
+      ecc_secded_enc u_enc (
+          .data_i   (enc_data_in),
+          .encoded_o(enc_word)
+      );
+
+      // Matriz física de 39 bits con escritura atómica (BYTE_WRITE=0)
+      bram_sp #(
+          .WORDS     (WORDS),
+          .ADDR_BITS (ADDR_BITS),
+          .DATA_WIDTH(39),
+          .BYTE_WRITE(1'b0),
+          .USE_INIT  (USE_INIT),
+          .INIT_FILE (INIT_FILE)
+      ) u_bram (
+          .clk  (clk),
+          .en   (bram_en),
+          .wstrb({4{bram_we}}),
+          .addr (bram_addr),
+          .wdata(bram_wdata),
+          .rdata(bram_rdata)
+      );
+    end
+  endgenerate
+`else
   ecc_secded_dec u_dec (
       .encoded_i(bram_rdata),
       .data_o   (dec_data),
@@ -57,16 +125,6 @@ module bram_ecc #(
       .sbiterr_o(dec_sbiterr),
       .dbiterr_o(dec_dbiterr)
   );
-
-  // Mezcla combinacional por bytes para sb/sh y codificador Hsiao único compartido (sw / RMW)
-  wire [31:0] rmw_merged_data = {
-    wstrb_q[3] ? wdata_q[31:24] : rmw_base_q[31:24],
-    wstrb_q[2] ? wdata_q[23:16] : rmw_base_q[23:16],
-    wstrb_q[1] ? wdata_q[15:8] : rmw_base_q[15:8],
-    wstrb_q[0] ? wdata_q[7:0] : rmw_base_q[7:0]
-  };
-  wire [31:0] enc_data_in = (state == ST_RMW_WRITE) ? rmw_merged_data : wdata_i;
-  wire [38:0] enc_word;
 
   ecc_secded_enc u_enc (
       .data_i   (enc_data_in),
@@ -89,6 +147,7 @@ module bram_ecc #(
       .wdata(bram_wdata),
       .rdata(bram_rdata)
   );
+`endif
 
   // Arranque válido en reposo (ignora valid_i mientras el pulso ready_o sigue alto 1 ciclo)
   wire start_access = resetn && valid_i && !ready_o;
