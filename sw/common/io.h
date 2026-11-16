@@ -9,6 +9,10 @@
 #define CSR_TMR_CTRL_ERR 0xCC1
 #define CSR_ECC_REG_SBU  0xCC2
 #define CSR_ECC_REG_DBU  0xCC3
+#define REG_ECC_IMEM_SBU (*(volatile uint32_t *)0x30000000)
+#define REG_ECC_IMEM_DBU (*(volatile uint32_t *)0x30000004)
+#define REG_ECC_DMEM_SBU (*(volatile uint32_t *)0x30000008)
+#define REG_ECC_DMEM_DBU (*(volatile uint32_t *)0x3000000C)
 
 #define _SHRV_READ_CSR(csr) ({              \
     uint32_t _val;                          \
