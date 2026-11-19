@@ -59,7 +59,7 @@
 % 0. Cabecera
 % ==============================================================================
 \node[font=\huge\bfseries] at (12.50, 17.90)
-  {SHRV32 -- Esquema RTL TMR (PC y Control)};
+  {HPicoRV32 -- Esquema RTL TMR (PC y Control)};
 
 % ==============================================================================
 % 1. Columna Izquierda: Lógica Next-State / Self-Healing + Atributos + Leyenda
