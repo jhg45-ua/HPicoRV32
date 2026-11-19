@@ -1,13 +1,15 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       bram_sp.v
 // Descripción:  BRAM single-port síncrona parametrizable (32b wstrb o 39b ECC)
 // Reloj/Reset:  clk (flanco de subida) | sin reset en la matriz de memoria
 // =============================================================================
 
+`timescale 1 ns / 1 ps
+
 module bram_sp #(
-    parameter integer       WORDS      = 4096,
-    parameter integer       ADDR_BITS  = 12,
+    parameter integer       WORDS      = 2048,
+    parameter integer       ADDR_BITS  = 11,
     parameter integer       DATA_WIDTH = 32,
     parameter         [0:0] BYTE_WRITE = 1'b1,
     parameter         [0:0] USE_INIT   = 1'b1,
@@ -25,7 +27,6 @@ module bram_sp #(
   reg [DATA_WIDTH-1:0] mem[0:WORDS-1];
 
   // Precarga firmware (con ECC en 39b) si USE_INIT=1, o alinea simulación a 0 como la FPGA
-  integer init_idx;
   generate
     if (USE_INIT) begin : gen_init
       initial begin
@@ -38,6 +39,7 @@ module bram_sp #(
 `endif
       end
     end else begin : gen_zero_init
+      integer init_idx;
       initial begin
         for (init_idx = 0; init_idx < WORDS; init_idx = init_idx + 1)
         mem[init_idx] = {DATA_WIDTH{1'b0}};

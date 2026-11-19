@@ -1,12 +1,12 @@
 # ==============================================================================
-# Proyecto: SHRV32 (Space-Hardened RISC-V 32)
+# Proyecto: HPicoRV32 (Hardened PicoRV32)
 # Script:   create_project.tcl — Crea el proyecto Vivado en build/vivado/
 # ==============================================================================
 
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize "$script_dir/../.."]
 set proj_dir   "$repo_root/build/vivado"
-set proj_name  "shrv32"
+set proj_name  "hpicorv32"
 set part_name  "xc7a100tcsg324-1"
 
 file mkdir $proj_dir

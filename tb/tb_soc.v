@@ -1,7 +1,7 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       tb_soc.v
-// Descripción:  Banco de pruebas del SoC base (arranque, UART TX, LEDs y trap)
+// Descripción:  Banco integral del SoC (TMR, ECC cpuregs/IMEM/DMEM y protección Harvard W^X)
 // Reloj/Reset:  clk simulado a 100 MHz | resetn activo bajo
 // =============================================================================
 
@@ -73,17 +73,17 @@ module tb_soc;
     end
   end
 
-  reg expect_ecc_trap = 1'b0;
+  reg expect_trap = 1'b0;
 
   // Aborta inmediatamente si la CPU entra en estado trap no esperado
   always @(posedge clk) begin
-    if (uut.sys_resetn && trap && !expect_ecc_trap) begin
+    if (uut.sys_resetn && trap && !expect_trap) begin
       $display("\n[SIM ERROR] La CPU activó TRAP inesperado en %0t ns", $time);
       $finish;
     end
   end
 
-  // Límite de seguridad (30 ms @ 100 MHz)
+  // Límite de seguridad (60 ms @ 100 MHz)
   initial begin
     repeat (6000000) @(posedge clk);
     $display("\n[SIM FIN] Timeout alcanzado limpiamente sin trap.");
@@ -396,13 +396,13 @@ module tb_soc;
     end
   endtask
 
-  // Resetea el SoC y limpia expect_ecc_trap solo tras caer sys_resetn (evita falsa alarma)
+  // Resetea el SoC y limpia expect_trap solo tras caer sys_resetn (evita falsa alarma)
   task apply_reset;
     begin
       @(negedge clk);
       resetn = 1'b0;
       wait (uut.sys_resetn === 1'b0);
-      expect_ecc_trap = 1'b0;
+      expect_trap = 1'b0;
       repeat (10) @(posedge clk);
       @(negedge clk);
       resetn = 1'b1;
@@ -485,12 +485,98 @@ module tb_soc;
         $finish;
       end
 
+      // Restaura DMEM antes del siguiente reset para las pruebas Harvard W^X
+      uut.dmem.u_bram.mem[target_addr] = golden_word;
       $display("[ECC PASS @ %0t ns] DMEM DBE fatal addr=0x%03h -> trap=1 | dmem_dbu=%0d", $time,
                target_addr, uut.count_ecc_dmem_dbu);
     end
   endtask
 
-  // Campaña integral: TMR (PC+CTRL) + ECC recuperable (cpuregs+IMEM+DMEM) + 3 DBE fatales
+  // Comprueba que un fetch de instrucción en DMEM (0x0000_2000) activa harv_fault_r y trap=1
+  task check_harvard_exec_dmem;
+    begin
+      @(negedge clk);
+      while (!(uut.cpu.mem_la_read === 1'b1 &&
+               (uut.cpu.mem_do_rinst === 1'b1 || uut.cpu.mem_do_prefetch === 1'b1) &&
+               !(uut.cpu.latched_store && uut.cpu.latched_branch)))
+      @(negedge clk);
+
+      uut.cpu.reg_next_pc_r0 = 32'h0000_2000;
+      uut.cpu.reg_next_pc_r1 = 32'h0000_2000;
+      uut.cpu.reg_next_pc_r2 = 32'h0000_2000;
+
+      #1;
+      if (uut.cpu.mem_la_addr !== 32'h0000_2000) begin
+        $display("[HARV FAIL] Fetch DMEM @ %0t ns: mem_la_addr=%h", $time, uut.cpu.mem_la_addr);
+        $finish;
+      end
+
+      @(posedge clk);  // T0: el bus expone mem_valid=1, mem_instr=1, mem_addr=0x2000
+      #1;
+      if (uut.mem_valid !== 1'b1 || uut.mem_instr !== 1'b1 ||
+          uut.mem_addr !== 32'h0000_2000 || uut.harv_err !== 1'b1 ||
+          uut.dmem_sel !== 1'b0 || uut.imem_sel !== 1'b0) begin
+        $display("[HARV FAIL] Fetch DMEM T0 @ %0t ns: valid=%b instr=%b addr=%h harv_err=%b",
+                 $time, uut.mem_valid, uut.mem_instr, uut.mem_addr, uut.harv_err);
+        $finish;
+      end
+
+      @(posedge clk);  // T1: soc enclava harv_fault_r -> trap=1 y responde mem_ready=1
+      #1;
+      if (uut.harv_fault_r !== 1'b1 || trap !== 1'b1 || uut.mem_ready !== 1'b1) begin
+        $display("[HARV FAIL] Fetch DMEM T1 @ %0t ns: harv_fault=%b trap=%b ready=%b",
+                 $time, uut.harv_fault_r, trap, uut.mem_ready);
+        $finish;
+      end
+
+      $display("[HARV PASS @ %0t ns] Fetch en DMEM (0x00002000) bloqueado -> harv_fault_r=1, trap=1",
+               $time);
+    end
+  endtask
+
+  // Comprueba que una escritura hacia IMEM (0x0000_0000) queda bloqueada y activa trap=1
+  task check_harvard_write_imem;
+    reg [38:0] golden_imem0;
+    begin
+      @(negedge clk);
+      while (uut.cpu.mem_la_write !== 1'b1) @(negedge clk);
+
+      golden_imem0 = uut.imem.u_bram.mem[11'd0];
+      uut.cpu.reg_op1 = 32'h0000_0000;
+
+      #1;
+      if (uut.cpu.mem_la_addr !== 32'h0000_0000) begin
+        $display("[HARV FAIL] Escritura IMEM @ %0t ns: mem_la_addr=%h", $time,
+                 uut.cpu.mem_la_addr);
+        $finish;
+      end
+
+      @(posedge clk);  // T0: el bus expone mem_valid=1, wstrb!=0, mem_addr=0x0000
+      #1;
+      if (uut.mem_valid !== 1'b1 || (|uut.mem_wstrb) !== 1'b1 ||
+          uut.mem_addr !== 32'h0000_0000 || uut.harv_err !== 1'b1 ||
+          uut.imem_sel !== 1'b0 || uut.dmem_sel !== 1'b0) begin
+        $display("[HARV FAIL] Escritura IMEM T0 @ %0t ns: valid=%b wstrb=%b addr=%h harv_err=%b",
+                 $time, uut.mem_valid, uut.mem_wstrb, uut.mem_addr, uut.harv_err);
+        $finish;
+      end
+
+      @(posedge clk);  // T1: soc enclava harv_fault_r -> trap=1, mem_ready=1 e IMEM intacta
+      #1;
+      if (uut.harv_fault_r !== 1'b1 || trap !== 1'b1 || uut.mem_ready !== 1'b1 ||
+          uut.imem.u_bram.mem[11'd0] !== golden_imem0) begin
+        $display("[HARV FAIL] Escritura IMEM T1 @ %0t ns: harv_fault=%b trap=%b ready=%b",
+                 $time, uut.harv_fault_r, trap, uut.mem_ready);
+        $finish;
+      end
+
+      $display(
+          "[HARV PASS @ %0t ns] Escritura en IMEM (0x00000000) bloqueada e IMEM intacta -> trap=1",
+          $time);
+    end
+  endtask
+
+  // Campaña integral: TMR (PC+CTRL) + ECC recuperable (cpuregs+IMEM+DMEM) + DBE fatales + Harvard W^X
   initial begin
     apply_reset;
     wait (leds == 15'h0001);
@@ -522,18 +608,27 @@ module tb_soc;
     wait (leds == 15'h0020);
 
     // 4. Tres pruebas de DBE fatal separadas por reset rápido
-    expect_ecc_trap = 1'b1;
+    expect_trap = 1'b1;
     inject_reg_dbe_fatal(39'h4000_0001);
 
     apply_reset;
-    expect_ecc_trap = 1'b1;
+    expect_trap = 1'b1;
     inject_imem_dbe_fatal(39'h0000_0003);
 
     apply_reset;
-    expect_ecc_trap = 1'b1;
+    expect_trap = 1'b1;
     inject_dmem_dbe_fatal(39'h0000_0003);
 
-    $display("[SIM FIN] Verificacion integral TMR + ECC (cpuregs/IMEM/DMEM) completada con exito.");
+    // 5. Dos pruebas de violación Harvard W^X (ejecución en DMEM y escritura en IMEM)
+    apply_reset;
+    expect_trap = 1'b1;
+    check_harvard_exec_dmem;
+
+    apply_reset;
+    expect_trap = 1'b1;
+    check_harvard_write_imem;
+
+    $display("[SIM FIN] Verificacion integral TMR + ECC + Harvard W^X completada con exito.");
     $finish;
   end
 

@@ -1,5 +1,5 @@
 # ==============================================================================
-# Proyecto: SHRV32 (Space-Hardened RISC-V 32)
+# Proyecto: HPicoRV32 (Hardened PicoRV32)
 # Script:   build.tcl — Síntesis, implementación y bitstream en modo batch
 # ==============================================================================
 
@@ -27,7 +27,7 @@ report_utilization    -file "$proj_dir/utilization.rpt"
 report_timing_summary -file "$proj_dir/timing.rpt"
 
 set bit_src "$proj_dir/${proj_name}.runs/impl_1/soc.bit"
-set bit_dst "$proj_dir/shrv32.bit"
+set bit_dst "$proj_dir/hpicorv32.bit"
 file copy -force $bit_src $bit_dst
 
 puts "INFO: Bitstream listo en $bit_dst"

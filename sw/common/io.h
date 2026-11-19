@@ -14,7 +14,7 @@
 #define REG_ECC_DMEM_SBU (*(volatile uint32_t *)0x30000008)
 #define REG_ECC_DMEM_DBU (*(volatile uint32_t *)0x3000000C)
 
-#define _SHRV_READ_CSR(csr) ({              \
+#define _HPICO_READ_CSR(csr) ({             \
     uint32_t _val;                          \
     __asm__ volatile (                      \
         ".option push\n\t"                  \
@@ -25,12 +25,12 @@
     );                                      \
     _val;                                   \
 })
-#define SHRV_READ_CSR(csr) _SHRV_READ_CSR(csr)
+#define HPICO_READ_CSR(csr) _HPICO_READ_CSR(csr)
 
-static inline uint32_t tmr_read_pc_err(void)   { return SHRV_READ_CSR(CSR_TMR_PC_ERR); }
-static inline uint32_t tmr_read_ctrl_err(void) { return SHRV_READ_CSR(CSR_TMR_CTRL_ERR); }
-static inline uint32_t ecc_read_reg_sbu(void)  { return SHRV_READ_CSR(CSR_ECC_REG_SBU); }
-static inline uint32_t ecc_read_reg_dbu(void)  { return SHRV_READ_CSR(CSR_ECC_REG_DBU); }
+static inline uint32_t tmr_read_pc_err(void)   { return HPICO_READ_CSR(CSR_TMR_PC_ERR); }
+static inline uint32_t tmr_read_ctrl_err(void) { return HPICO_READ_CSR(CSR_TMR_CTRL_ERR); }
+static inline uint32_t ecc_read_reg_sbu(void)  { return HPICO_READ_CSR(CSR_ECC_REG_SBU); }
+static inline uint32_t ecc_read_reg_dbu(void)  { return HPICO_READ_CSR(CSR_ECC_REG_DBU); }
 
 static inline void putc(char c) {
     if (c == '\n') REG_UART_DATA = '\r';

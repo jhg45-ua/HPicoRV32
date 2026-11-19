@@ -1,5 +1,5 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       ecc_secded.v
 // Descripción:  Codificador y decodificador Hsiao SEC-DED (39,32) combinacional
 // Reloj/Reset:  Ninguno (lógica puramente combinacional)
@@ -44,7 +44,10 @@ module ecc_secded_dec (
   wire [ 6:0] ecc_rx = encoded_i[38:32];
 
   // Reutiliza el codificador para no duplicar las ecuaciones XOR de la matriz Hsiao
+  // ([31:0] devuelve data_rx sin cambios; aquí solo necesitamos los 7 bits de paridad [38:32])
+  /* verilator lint_off UNUSEDSIGNAL */
   wire [38:0] reencoded;
+  /* verilator lint_on UNUSEDSIGNAL */
   ecc_secded_enc u_reenc (
       .data_i   (data_rx),
       .encoded_o(reencoded)

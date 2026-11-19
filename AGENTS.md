@@ -1,10 +1,10 @@
-# AGENTS.md — Directrices de Desarrollo para SHRV32
+# AGENTS.md — Directrices de Desarrollo para HPicoRV32
 
 ## 1. Identidad y Alcance del Proyecto
-- **Arquitectura:** SHRV32 (*Space-Hardened RISC-V 32*), basada en PicoRV32 (interfaz nativa, sin AXI).
+- **Arquitectura:** **HPicoRV32** (*Hardened PicoRV32*, anteriormente conocido como `SHRV32`), basada en PicoRV32 (RV32I, interfaz nativa sin AXI).
 - **Misión:** Mitigación de fallos por radiación (*Single Event Upsets* / *bit-flips*) para futuro núcleo de control de una IP de red neuronal espacial.
-- **Objetivos iniciales:** A grandes rasgos, los objetivos principales son las de endurecer el diseño con técnicas TMR y ECC.
-- **Hardware Activo:** Digilent Nexys A7 100T (`xc7a100tcsg324-1`) en AMD Xilinx Vivado.
+- **Objetivos iniciales:** Endurecimiento completo mediante TMR selectivo con *self-healing*, bus Harvard con protección `W^X` y codificación ECC Hsiao SEC-DED (39,32) en registros y memorias.
+- **Hardware Activo:** Digilent Nexys A7 100T (`xc7a100tcsg324-1`) en AMD Xilinx Vivado y flujo abierto openXC7.
   *(Nota de portabilidad: Microchip PolarFire es el destino futuro; evitar primitivas propietarias de Xilinx innecesarias en `rtl/core/`).*
 
 ## 2. Rol del Agente y Estilo Pedagógico
@@ -13,7 +13,7 @@
 - **Cabecera estándar obligatoria** al inicio de cada módulo nuevo en `rtl/` o de código HDL:
   ```verilog
   // =============================================================================
-  // Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+  // Proyecto:     HPicoRV32 (Hardened PicoRV32)
   // Módulo:       <nombre_modulo>.v
   // Descripción:  <Propósito 1-2 directo en líneas>
   // Reloj/Reset:  clk (flanco subida) | resetn (activo bajo)
@@ -22,22 +22,22 @@
 
 ## 3. Mapa del Repositorio y Permisos
 - `rtl/`: Código Verilog sintetizable (`core/`, `mem/`, `periph/`, `top/`).
-- `tb/`: Bancos de pruebas de los modulos escritos.
-- `sw/`: Firmware bare-metal (`boot/` con bootloader básico y `apps/`).
+- `tb/`: Bancos de pruebas de los módulos escritos.
+- `sw/`: Firmware bare-metal (`boot/` con `crt0.S` y `sections.ld` para el mapa Harvard, además de `bootloader.c` como referencia histórica pre-Harvard; aplicaciones en `apps/`).
 - `fpga/nexys_a7/`: Archivo `.xdc` y scripts Tcl (`create_project.tcl`, `build.tcl`).
-- `docs/`: Bitácora técnica (`logbook.md`), notas de HARV y PicoRV32 y diagramas (`arch/`).
+- `docs/`: Bitácora técnica (`logbook.md`), notas de HARV (`harv_notes.md`) y diagramas (`arch/`).
 - `external/`: Submódulos Git (`picorv32` y `harv`). **Estrictamente SOLO LECTURA**; nunca modificar ni crear archivos aquí.
 
 ## 4. Comandos de Verificación y Herramientas
 - **Simulación Open Source (CLI + Surfer):**
-  - Compilar y simular: `iverilog -g2001 -o build/sim.out <tb.v> <rtl.v> && vvp build/sim.out` *(alternativa: Verilator)*.
+  - Compilar y simular: `iverilog -g2001 -o build/sim.out <tb.v> <rtl.v> && vvp build/sim.out` *(alternativa: `make sim SIM=verilator`)*.
   - Ver formas de onda: `surfer build/dump.vcd`.
   - Todo testbench debe incluir `$dumpfile("build/dump.vcd");` y `$dumpvars(0, <nombre_tb>);`, además de tareas (`task`) con máscaras XOR para inyectar *bit-flips* en módulos TMR/ECC.
-- **Firmware:** `make sw` (compila `sw/boot/` + `sw/apps/counter/` y genera `build/firmware.hex`).
-- **Vivado Batch / GUI y Programación:**
-  - Síntesis y bitstream sin GUI: `vivado -mode batch -source fpga/nexys_a7/build.tcl`
-  - Generar proyecto para abrir en GUI: `vivado -mode batch -source fpga/nexys_a7/create_project.tcl`
-  - Programación de placa: Vivado Hardware Manager por defecto; alternativa CLI: `openFPGALoader -b nexys_a7 build/vivado/shrv32.bit`.
+- **Firmware:** `make sw` (compila `sw/boot/crt0.S` + `sw/apps/counter/` con `--ecc` y genera `build/firmware.hex`).
+- **Vivado Batch / GUI, openXC7 y Programación:**
+  - Síntesis y bitstream sin GUI (Vivado): `vivado -mode batch -source fpga/nexys_a7/build.tcl` *(o `make synth SYNTH=openxc7`)*.
+  - Generar proyecto para abrir en GUI: `vivado -mode batch -source fpga/nexys_a7/create_project.tcl`.
+  - Programación de placa: Vivado Hardware Manager por defecto; alternativa CLI: `openFPGALoader -b nexys_a7_100 build/vivado/hpicorv32.bit` *(o `make prog SYNTH=openxc7`)*.
 
 ## 5. Flujo de Trabajo en Git
 - **Rama principal (`main`):** Solo contiene diseño verificado en simulación y/o síntesis. Evitar commits de pruebas sin validar directamente en `main`.

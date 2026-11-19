@@ -1,5 +1,5 @@
 # ==============================================================================
-# Proyecto: SHRV32 (Space-Hardened RISC-V 32)
+# Proyecto: HPicoRV32 (Hardened PicoRV32)
 # Archivo:  Nexys-A7-100T-Master.xdc — Restricciones de pines (xc7a100tcsg324-1)
 # ==============================================================================
 

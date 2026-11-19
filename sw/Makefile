@@ -1,5 +1,5 @@
 # ==============================================================================
-# Makefile de Firmware — SHRV32
+# Makefile de Firmware — HPicoRV32 (Hardened PicoRV32)
 # Compila sw/boot/crt0.S y sw/apps/$(APP)/, generando ../build/firmware.hex
 # ==============================================================================
 

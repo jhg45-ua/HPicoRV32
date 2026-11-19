@@ -1,4 +1,4 @@
-# Bitácora Técnica — SHRV32
+# Bitácora Técnica — HPicoRV32
 
 Registro cronológico de hitos, verificaciones en simulación y métricas reales de implementación (*post-route* en **Vivado** y **openXC7**) en **Digilent Nexys A7-100T** (`xc7a100tcsg324-1`) para comparar la evolución de recursos y frecuencia frente al diseño base.
 
@@ -288,3 +288,50 @@ Comparativa de las tres implementaciones cerradas en el Hito 2 frente al Hito 1 
 - **Coste de área del endurecimiento ECC:** proteger `cpuregs`, `imem` y `dmem` añade `~682–706` Slice LUTs, `+432–439` FFs y solo **`+1` Block RAM Tile** (`5` tiles en total frente a `4`, pasando cada banco de `2048 × 32` a `2048 × 39` bits con `2 RAMB36E1 + 1 RAMB18E1`), más `+2` primitivas `RAM32M` (`14` en total) para almacenar los 7 bits extra de paridad en el banco de registros sin perder inferencia de LUTRAM.
 - **Resolución del DRC `MDRV-1` en `blk_mem_gen_dmem_ecc`:** activar simultáneamente `CONFIG.ECC {true}` y `CONFIG.softecc {true}` en Tcl encendía a la vez `C_USE_ECC = 1` (ECC *hard* de primitiva `RAMB36E1` en modo `512 × 64`, forzando 4 bancos en profundidad y el mux `has_mux_b.B`) y `C_USE_SOFTECC = 1` (ECC *soft* en LUTs), generando doble driver sobre `sbiterr` y `dbiterr`. Fijar `CONFIG.ECC {false}` junto a `CONFIG.ecctype {Soft_ECC}` y `CONFIG.softecc {true}` selecciona exclusivamente el modo *Soft ECC* (`C_USE_ECC = 0, C_USE_SOFTECC = 1`), reduciendo DMEM a `2 RAMB36E1 + 1 RAMB18E1` y eliminando por completo el conflicto DRC.
 - **Camino crítico a 100 MHz (`WNS = +0.240 ns`):** la ruta crítica ya no pasa por las memorias BRAM (aisladas por el registro `rdata_o` de `bram_ecc`), sino por la lectura asíncrona en LUTRAM de `cpuregs` + decodificación combinacional Hsiao (`u_dec_rs1`/`u_dec_rs2`) + lógica de detección/votación TMR (`9.611 ns` en Vivado con IP; `9.772 ns` en Vivado RTL; `9.60 ns` en `openXC7`). Los tres flujos cierran *timing* a `100.000 MHz` sin violaciones.
+
+---
+
+## [2026-11-19] — Consolidación arquitectónica y migración a HPicoRV32
+
+### Objetivo
+Auditar, limpiar y consolidar todas las modificaciones de endurecimiento (TMR selectivo con *self-healing*, bus Harvard `W^X`, ECC Hsiao SEC-DED en `cpuregs`/`IMEM`/`DMEM` y CSRs de telemetría), completar la cobertura de verificación en simulación (incluyendo violaciones Harvard `W^X`), migrar el nombre del proyecto de `SHRV32` a **HPicoRV32** (*Hardened PicoRV32*) y validar una síntesis limpia en `openXC7`.
+
+### Cambios consolidados
+- **Higiene RTL (`rtl/core/`, `rtl/mem/`):**
+  - Cabeceras estándar `HPicoRV32` (preservando la licencia ISC original en [`picorv32.v`](../rtl/core/picorv32.v)), `` `timescale 1 ns / 1 ps `` en [`tmr_voter.v`](../rtl/core/tmr_voter.v), [`bram_sp.v`](../rtl/mem/bram_sp.v) y [`bram_ecc.v`](../rtl/mem/bram_ecc.v), limpieza de comentarios obsoletos y supresión puntual de `UNUSEDSIGNAL` sobre `reencoded[31:0]` en [`ecc_secded.v`](../rtl/core/ecc_secded.v).
+  - En [`bram_sp.v`](../rtl/mem/bram_sp.v), parámetros por defecto alineados a `WORDS = 2048` / `ADDR_BITS = 11` y declaración `integer init_idx;` movida dentro de `gen_zero_init` para eliminar avisos estáticos cuando `USE_INIT = 1`.
+- **Parametrización del SoC ([`soc.v`](../rtl/top/soc.v)):**
+  - Exposición de `ENABLE_TMR` y `ENABLE_REG_ECC` en el módulo raíz y derivación automática de `IMEM_ADDR_BITS`/`DMEM_ADDR_BITS` mediante función constante `clog2` Verilog-2001 y cálculo `dmem_byte_off = mem_addr - DMEM_BASE`.
+- **Cobertura de pruebas ([`tb_soc.v`](../tb/tb_soc.v)):**
+  - Adición de `check_harvard_exec_dmem` (*fetch* ilegal en `0x0000_2000`) y `check_harvard_write_imem` (escritura ilegal en `0x0000_0000`), verificando `harv_err`, bloqueo de `imem_sel`/`dmem_sel`, enclavamiento de `harv_fault_r` $\rightarrow$ `trap = 1` y respuesta `mem_ready = 1`.
+- **Infraestructura, firmware y documentación:**
+  - Actualización a `HPicoRV32` (`hpicorv32.bit` / `hpicorv32.xpr`) en [`Makefile`](../Makefile), `fpga/nexys_a7/`, [`sw/`](../sw/), [`.vscode/settings.json`](../.vscode/settings.json), [`AGENTS.md`](../AGENTS.md), [`README.md`](../README.md) y fuentes `.tex`/`.tikz` en [`docs/arch/`](arch/).
+  - Detección dinámica `VLT_PROCASSINIT_FLAG` en [`Makefile`](../Makefile) para compatibilidad multi-versión con Verilator, desacoplamiento `SIM_DEPS` para pruebas unitarias sin toolchain RISC-V, y conservación de [`bootloader.c`](../sw/boot/bootloader.c) y [`upload.py`](../sw/common/upload.py) como referencia histórica pre-Harvard.
+
+### Verificación en simulación y linting
+- **Lint estricto (`Verilator 5.054`):**
+  - Módulos propios con `-Wall`: `0` avisos y `0` errores en `tmr_voter.v`, `ecc_secded.v` (`-Wno-DECLFILENAME`), `bram_sp.v` y `bram_ecc.v`.
+  - Matriz de parámetros en `soc`: `0` errores en `ENABLE_TMR=0/1 × ENABLE_REG_ECC=0/1`, con `IMEM_WORDS=4096, DMEM_WORDS=1024`, y en backend dual `-DVIVADO_ECC_IP=1` (con *stub* de `blk_mem_gen_dmem_ecc`).
+- **Batería de testbenches (`iverilog -g2001` y `Verilator`):**
+  - [`tb_tmr_voter.v`](../tb/tb_tmr_voter.v): `5/5` casos superados en ambos simuladores.
+  - [`tb_ecc_secded.v`](../tb/tb_ecc_secded.v): `5468/5468` comprobaciones superadas en ambos simuladores.
+  - [`tb_bram_ecc.v`](../tb/tb_bram_ecc.v): `6/6` pruebas superadas en ambos simuladores.
+  - [`tb_soc.v`](../tb/tb_soc.v) (`SIM_FAST=1`): superado sin errores en `Verilator` (`2.365 s` sin traza) y en `iverilog` (4 estados), validando banner `HPicoRV32 (Hardened PicoRV32) - Nexys A7-100T`, latido `[HPicoRV32 Latido] Contador = 1 | PC=00000003 CTRL=00000004 SBU=00000003 DBU=00000000 ISBU=00000002 IDBU=00000000 DSBU=00000002 DDBU=00000000`, 3 fallos DBE fatales y 2 violaciones Harvard `W^X`.
+
+### Métricas de implementación en `openXC7` (`xc7a100tcsg324-1` @ 100 MHz)
+Firmware de FPGA compilado con `SIM_FAST=0` (`.text = 908` B, `.data = 4` B, `.bss = 4` B) y generación limpia de `build/openxc7/hpicorv32.bit` (`3825904` bytes):
+
+| Recurso / Métrica | Hito 2 `openXC7` (SHRV32) | Consolidación `openXC7` (HPicoRV32) | Delta |
+| --- | ---: | ---: | ---: |
+| **Yosys Logic LUTs (`LUT2`–`LUT6`)** | `2580` | `2617` (`513 LUT2`, `520 LUT3`, `424 LUT4`, `856 LUT5`, `304 LUT6`) | `+37` |
+| **Post-route `SLICE_LUTX` (`nextpnr`)** | `3886 / 126800` (`3 %`) | `3922 / 126800` (`3 %`) | `+36` |
+| **LUTRAM (`RAM32M` / `cpuregs`)** | `14` | `14` | `0` |
+| **Flip-Flops (`SLICE_FFX`)** | `1360` (`1349 FDRE` + `11 FDSE`) | `1360 / 126800` (`1 %` · `1349 FDRE` + `11 FDSE`, `0` latches) | `0` |
+| **Block RAM (`RAMB18E1`)** | `10 / 270` (`5` eq. `RAMB36`) | `10 / 270` (`3 %` · `5` eq. `RAMB36`) | `0` |
+| **Carry Chains (`CARRY4`)** | `179` (`176` Yosys) | `178 / 15850` (`1 %` · `176` Yosys) | `-1` (`0` Yosys) |
+| **$F_{\max}$ (`cpu.clk` @ 100 MHz)** | `104.13 MHz` (`PASS`) | `112.82 MHz` (`PASS`, `3 warnings, 0 errors`) | `+8.69 MHz` |
+
+### Observaciones de auditoría post-síntesis (`soc.json` y `nextpnr.log`)
+- **Cero *latches* y preservación exacta 3× de TMR:** la inspección de `build/openxc7/soc.json` confirma `0` celdas `LDCE`/latch y las 3 réplicas exactas en los 5 registros protegidos (`reg_pc`: `32/32/32`, `reg_next_pc`: `32/32/32`, `cpu_state`: `8/8/8`, `latched_rd`: `5/5/5`, `mem_state`: `2/2/2`).
+- **Camino crítico:** `imem.u_bram.mem.0.2.DOADO6` $\rightarrow$ decodificador Hsiao (`imem.dec_sbiterr`) $\rightarrow$ `$auto$ff.cc:337:slice$17695.D` (`8.86 ns` totales: `3.60 ns` lógica + `5.26 ns` ruta, *slack* mínimo positivo `+1.14 ns` frente al periodo de `10.00 ns`).
+- **Coste de parametrización (`clog2` / `dmem_byte_off`):** `0` FFs, `0` `RAMB18E1`, `0` `RAM32M` y `0` `CARRY4` adicionales en Yosys.

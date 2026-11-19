@@ -2,7 +2,7 @@
 
 Este core utiliza la ISA RISC-V (RV32I) e implementa técnicas de protección contra SEU y SET (*Single Event Upset* y *Single Event Transient*) mediante codificación Hamming y Triple Modular Redundancy (TMR).
 
-> **Contexto y trazabilidad:** El análisis RTL corresponde al submódulo de solo lectura [`external/harv`](../external/harv). Las métricas *post-route* de síntesis *Out-Of-Context* (`harv_*`) y las cifras de referencia de `picorv32-soc` (`system_ecc`, `system_tmr_ecc`) proceden de corridas previas en Vivado `v2025.2` (`xc7a100tcsg324-1`, 100 MHz) externas a los scripts actuales de este repositorio (actualmente en Hito 0, [`logbook.md`](logbook.md)).
+> **Contexto y trazabilidad:** El análisis RTL corresponde al submódulo de solo lectura [`external/harv`](../external/harv). Las métricas *post-route* de síntesis *Out-Of-Context* (`harv_*`) y las cifras de referencia de `picorv32-soc` (`system_ecc`, `system_tmr_ecc`) proceden de corridas previas en Vivado `v2025.2` (`xc7a100tcsg324-1`, 100 MHz) externas a los scripts actuales de este repositorio (actualmente en Hito 0, [`logbook.md`](logbook.md); las menciones a `SHRV32` corresponden al nombre previo de `HPicoRV32`).
 
 ## 1. Protección TMR
 El core HARV implementa TMR con una estrategia "macro" donde se sigue el patron de envolver los modulos sin modificar su codigo RTL interno. Desde el *top-level* (`external/harv/hdl/harv.vhd`), la redundancia se habilita en tiempo de elaboracion mediante genericos booleanos independientes (`TMR_CONTROL` y `TMR_ALU`, ambos a `FALSE` por defecto), sustituyendo las instancias `control` y `alu` por los *wrappers* `control_tmr` y `alu_tmr`.

@@ -1,9 +1,11 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       bram_ecc.v
 // Descripción:  Controlador ECC Hsiao (39,32) sobre BRAM con scrubbing y RMW
 // Reloj/Reset:  clk (flanco subida) | resetn (activo bajo)
 // =============================================================================
+
+`timescale 1 ns / 1 ps
 
 module bram_ecc #(
     parameter integer       WORDS     = 2048,
