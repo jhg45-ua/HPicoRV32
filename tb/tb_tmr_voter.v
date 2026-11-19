@@ -1,5 +1,5 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       tb_tmr_voter.v
 // Descripción:  Testbench unitario para tmr_voter con inyección de fallos XOR
 // Reloj/Reset:  Sin reloj (estímulos combinacionales)

@@ -1,5 +1,5 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       tb_ecc_secded.v
 // Descripción:  Testbench exhaustivo SBE/DBE para Hsiao SEC-DED (39,32)
 // Reloj/Reset:  Sin reloj (estímulos combinacionales con inyección XOR)
