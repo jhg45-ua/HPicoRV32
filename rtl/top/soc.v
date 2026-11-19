@@ -1,18 +1,22 @@
 // =============================================================================
-// Proyecto:     SHRV32 (Space-Hardened RISC-V 32)
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       soc.v
-// Descripción:  Módulo raíz del SoC Harvard (PicoRV32 TMR + IMEM_ECC 8 KB + DMEM_ECC 8 KB + UART + LEDs)
+// Descripción:  SoC Harvard endurecido (HPicoRV32 TMR+ECC + IMEM/DMEM ECC 8 KB + UART + LEDs)
 // Reloj/Reset:  clk (flanco subida, 100 MHz) | resetn (activo bajo)
 // =============================================================================
 
+`timescale 1 ns / 1 ps
+
 module soc #(
-    parameter integer IMEM_WORDS    = 2048,                 // 8 KB: 0x0000_0000 - 0x0000_1FFF
-    parameter integer DMEM_WORDS    = 2048,                 // 8 KB: 0x0000_2000 - 0x0000_3FFF
-    parameter         FIRMWARE_FILE = "build/firmware.hex"
+    parameter integer IMEM_WORDS     = 2048,                 // 8 KB: 0x0000_0000 - 0x0000_1FFF
+    parameter integer DMEM_WORDS     = 2048,                 // 8 KB: 0x0000_2000 - 0x0000_3FFF
+    parameter [0:0]   ENABLE_TMR     = 1'b1,                 // TMR 2-de-3 en PC y control de CPU
+    parameter [0:0]   ENABLE_REG_ECC = 1'b1,                 // ECC Hsiao (39,32) en cpuregs
+    parameter         FIRMWARE_FILE  = "build/firmware.hex"
 ) (
     input             clk,     // Reloj del sistema a 100 MHz (Nexys A7 pin E3)
     input             resetn,  // Botón externo de reset activo bajo (CPU_RESETN)
-    output            trap,    // Trampa de CPU o violación de acceso Harvard -> LED15
+    output            trap,    // Trampa de CPU, violación Harvard W^X o DBE ECC -> LED15
     output reg [14:0] leds,    // 15 LEDs de usuario mapeados en 0x1000_0000
     output            ser_tx,  // Línea TX UART hacia el puente USB-UART FTDI
     input             ser_rx   // Línea RX UART desde el puente USB-UART FTDI
@@ -36,6 +40,19 @@ module soc #(
   wire [ 3:0] mem_wstrb;
   wire [31:0] mem_rdata;
 
+  // Función constante Verilog-2001 para derivar el ancho de dirección desde WORDS
+  function integer clog2;
+    input integer value;
+    integer v;
+    begin
+      v = value - 1;
+      for (clog2 = 0; v > 0; clog2 = clog2 + 1) v = v >> 1;
+    end
+  endfunction
+
+  localparam integer IMEM_ADDR_BITS = (IMEM_WORDS > 1) ? clog2(IMEM_WORDS) : 1;
+  localparam integer DMEM_ADDR_BITS = (DMEM_WORDS > 1) ? clog2(DMEM_WORDS) : 1;
+
   // Límites de direcciones en bytes para partición Harvard (IMEM seguida de DMEM)
   localparam [31:0] IMEM_BYTES = IMEM_WORDS * 4;
   localparam [31:0] DMEM_BASE = IMEM_BYTES;
@@ -56,7 +73,7 @@ module soc #(
   wire uart_dat_sel = mem_valid && (mem_addr == 32'h2000_0008);
   wire ecc_stat_sel = mem_valid && (mem_addr[31:4] == 28'h3000_000) && (mem_addr[1:0] == 2'b00);
 
-  // Núcleo PicoRV32 RV32I con endurecimiento TMR selectivo en PC y control
+  // Núcleo HPicoRV32 (RV32I) con TMR selectivo (PC/control) y ECC en cpuregs
   wire cpu_trap;
 
   picorv32 #(
@@ -70,8 +87,8 @@ module soc #(
       .CATCH_MISALIGN      (1),
       .CATCH_ILLINSN       (1),
       .REGS_INIT_ZERO      (1),
-      .ENABLE_TMR          (1),
-      .ENABLE_ECC          (1)
+      .ENABLE_TMR          (ENABLE_TMR),
+      .ENABLE_ECC          (ENABLE_REG_ECC)
   ) cpu (
       .clk         (clk),
       .resetn      (sys_resetn),
@@ -100,6 +117,10 @@ module soc #(
       .eoi         ()
   );
 
+  wire [IMEM_ADDR_BITS-1:0] imem_word_addr = mem_addr[IMEM_ADDR_BITS+1:2];
+  wire [31:0]               dmem_byte_off  = mem_addr - DMEM_BASE;
+  wire [DMEM_ADDR_BITS-1:0] dmem_word_addr = dmem_byte_off[DMEM_ADDR_BITS+1:2];
+
   // IMEM: 8 KB con Hsiao SEC-DED (READ_ONLY=1 desde bus, pero con auto-scrubbing interno)
   wire [31:0] imem_rdata;
   wire        imem_ready;
@@ -108,7 +129,7 @@ module soc #(
 
   bram_ecc #(
       .WORDS    (IMEM_WORDS),
-      .ADDR_BITS(11),
+      .ADDR_BITS(IMEM_ADDR_BITS),
       .READ_ONLY(1'b1),
       .USE_INIT (1'b1),
       .INIT_FILE(FIRMWARE_FILE)
@@ -117,7 +138,7 @@ module soc #(
       .resetn (sys_resetn),
       .valid_i(imem_sel),
       .wstrb_i(4'b0000),
-      .addr_i (mem_addr[12:2]),
+      .addr_i (imem_word_addr),
       .wdata_i(32'h0),
       .rdata_o(imem_rdata),
       .ready_o(imem_ready),
@@ -130,12 +151,12 @@ module soc #(
   wire        dmem_ready;
   wire        dmem_sbe;
   wire        dmem_dbe;
-  reg         harv_fault_r;  // Latch de violación W^X (declarado antes de su uso en dmem)
-  reg         ecc_fault_r;   // Latch de DBE incorregible en IMEM o DMEM
+  reg         harv_fault_r;  // Registro enclavado (sticky FF) de violación W^X (declarado antes de su uso en dmem)
+  reg         ecc_fault_r;   // Registro enclavado (sticky FF) de DBE incorregible en IMEM o DMEM
 
   bram_ecc #(
       .WORDS    (DMEM_WORDS),
-      .ADDR_BITS(11),
+      .ADDR_BITS(DMEM_ADDR_BITS),
       .READ_ONLY(1'b0),
       .USE_INIT (1'b0)
   ) dmem (
@@ -143,7 +164,7 @@ module soc #(
       .resetn (sys_resetn),
       .valid_i(dmem_sel),
       .wstrb_i((harv_fault_r || ecc_fault_r) ? 4'b0000 : mem_wstrb),
-      .addr_i (mem_addr[12:2]),
+      .addr_i (dmem_word_addr),
       .wdata_i(mem_wdata),
       .rdata_o(dmem_rdata),
       .ready_o(dmem_ready),

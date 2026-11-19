@@ -17,6 +17,15 @@
  *
  */
 
+// =============================================================================
+// Proyecto:     HPicoRV32 (Hardened PicoRV32)
+// Módulo:       picorv32.v
+// Descripción:  Núcleo PicoRV32 RV32I endurecido con TMR selectivo (PC/control),
+//               banco de registros ECC Hsiao (39,32) con auto-scrubbing y CSRs
+//               de telemetría (0xCC0-0xCC3). Parámetros: ENABLE_TMR, ENABLE_ECC.
+// Reloj/Reset:  clk (flanco subida) | resetn (activo bajo)
+// =============================================================================
+
 /* verilator lint_off WIDTH */
 /* verilator lint_off PINMISSING */
 /* verilator lint_off CASEOVERLAP */
@@ -177,10 +186,10 @@ module picorv32 #(
 	reg [63:0] count_cycle, count_instr;
 	reg [31:0] reg_op1, reg_op2, reg_out;
 
-	// Contadores de fallos TMR (PC/control) y ECC en banco de registros (SBU/DBU)
+	// Contadores de fallos TMR en PC y control (CSRs 0xCC0 y 0xCC1)
 	reg [31:0] count_tmr_pc, count_tmr_ctrl;
 
-	// Contadores para fallos ECC en el banco de registros (SBU = corregidos, DBU = dobles)
+	// Contadores de fallos ECC en banco de registros: SBU/DBU (CSRs 0xCC2 y 0xCC3)
 	reg [31:0] count_ecc_reg_sbu, count_ecc_reg_dbu;
 
 	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify/Yosys
@@ -1348,7 +1357,7 @@ module picorv32 #(
 		end
 	endgenerate
 
-	// Error agregado del dominio de control para telemetría CSR (Fase 4)
+	// Error agregado del dominio de control para telemetría CSR (0xCC1)
 	wire tmr_ctrl_err = cpu_state_err | mem_state_err | latched_rd_err;
 
 	reg [31:0] current_pc;
