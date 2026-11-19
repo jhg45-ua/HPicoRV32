@@ -1,10 +1,9 @@
 {
-  // Rutas de búsqueda de módulos (-y) e includes (-I) específicos de este proyecto
-  "verilog.linting.verilator.arguments": "-sv --lint-only --timing -y rtl/cores -y rtl/periph -y rtl/soc -Irtl/soc -Wall -Wno-UNUSEDSIGNAL -Wno-PINCONNECTEMPTY -Wno-BLKSEQ -Wno-WIDTH -Wno-DECLFILENAME -Wno-GENUNNAMED -Wno-MULTITOP -Wno-NEEDTIMINGOPT",
+  // Rutas de búsqueda de módulos (-y) específicas de HPicoRV32
+  "verilog.linting.verilator.arguments": "--lint-only --timing -y rtl/core -y rtl/mem -y rtl/periph -y rtl/top -Wall -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY -Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-SYNCASYNCNET",
 
-  // El LSP de Verible detecta automáticamente 'verible.filelist' en la raíz
+  // Reglas de estilo de Verible
   "verible.arguments": [
-    "--file_list_path=verible.filelist",
     "--rules=-explicit-parameter-storage-type,-unpacked-dimensions-range-ordering"
   ]
 }

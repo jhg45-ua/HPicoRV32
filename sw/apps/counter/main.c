@@ -17,7 +17,7 @@ void main(void) {
     dmem_byte++;
     puts("\r\n");
     puts("==================================================\r\n");
-    puts("  SHRV32 (PicoRV32) en Digilent Nexys A7-100T     \r\n");
+    puts("  HPicoRV32 (Hardened PicoRV32) - Nexys A7-100T   \r\n");
     puts("==================================================\r\n");
     puts("CPU iniciada correctamente. Contador en LEDs...\r\n\r\n");
 
@@ -26,7 +26,7 @@ void main(void) {
         REG_LEDS = counter & 0x7FFF;
 
         if ((counter & 0x0F) == 0) {
-            puts("[SHRV32 Latido] Contador = ");
+            puts("[HPicoRV32 Latido] Contador = ");
             char hex_char = "0123456789ABCDEF"[(counter >> 4) & 0x0F];
             putc(hex_char);
             puts(" | PC=");

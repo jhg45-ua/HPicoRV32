@@ -1,5 +1,5 @@
 # ==============================================================================
-# Makefile raíz — SHRV32 (Space-Hardened RISC-V 32)
+# Makefile raíz — HPicoRV32 (Hardened PicoRV32)
 # ==============================================================================
 
 BUILD_DIR   := build
@@ -22,22 +22,23 @@ CHIPDB_DIR  ?= $(HOME)/.cache/openxc7
 CHIPDB_BIN  := $(CHIPDB_DIR)/chipdb-$(FPGA_PART).bin
 
 ifeq ($(SYNTH),openxc7)
-BIT_FILE := $(OPENXC7_DIR)/shrv32.bit
+BIT_FILE := $(OPENXC7_DIR)/hpicorv32.bit
 else
-BIT_FILE := $(VIVADO_DIR)/shrv32.bit
+BIT_FILE := $(VIVADO_DIR)/hpicorv32.bit
 endif
 
 SIM         ?= iverilog
 TRACE       ?= 1
 TB_TOP      ?= $(basename $(notdir $(TB)))
+VLT_PROCASSINIT_FLAG := $(shell verilator -Wno-PROCASSINIT --version >/dev/null 2>&1 && echo -Wno-PROCASSINIT)
 VLT_WARN_FLAGS := -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY \
-	-Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED -Wno-PROCASSINIT \
+	-Wno-PINMISSING -Wno-BLKSEQ -Wno-GENUNNAMED $(VLT_PROCASSINIT_FLAG) \
 	-Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-SYNCASYNCNET
 
 .PHONY: help sw sim wave lint synth vivado-gui prog clean
 
 help:
-	@echo "Comandos disponibles en SHRV32:"
+	@echo "Comandos disponibles en HPicoRV32:"
 	@echo "  make sw [APP=counter] [SIM_FAST=1|0]                   -> Compila sw/apps/<APP> y genera build/firmware.hex"
 	@echo "  make sim [TB=...] [APP=...] [SIM=iverilog|verilator] [TRACE=1|0] -> Compila firmware y simula RTL"
 	@echo "  make wave                                              -> Abre build/dump.vcd en Surfer"
@@ -51,7 +52,8 @@ sw:
 	@mkdir -p $(BUILD_DIR)
 	$(MAKE) -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
 
-sim: sw
+SIM_DEPS := $(if $(filter tb/tb_soc.v,$(TB)),sw,)
+sim: $(SIM_DEPS)
 	@mkdir -p $(BUILD_DIR)
 ifeq ($(SIM), verilator)
 	verilator --binary $(if $(filter 1,$(TRACE)),--trace,) -j 0 $(VLT_WARN_FLAGS) \
@@ -103,7 +105,7 @@ synth: sw $(CHIPDB_BIN)
 	xc7frames2bit --part_file "$$PRJXRAY_DB_DIR/$(FPGA_FAMILY)/$(FPGA_PART)/part.yaml" \
 		--part_name $(FPGA_PART) \
 		--frm_file $(OPENXC7_DIR)/soc.frames \
-		--output_file $(OPENXC7_DIR)/shrv32.bit
+		--output_file $(OPENXC7_DIR)/hpicorv32.bit
 else
 synth: sw
 	@mkdir -p $(VIVADO_DIR)
@@ -119,7 +121,7 @@ vivado-gui: sw
 		-source $(TCL_DIR)/create_project.tcl \
 		-log $(VIVADO_DIR)/create.log \
 		-journal $(VIVADO_DIR)/create.jou
-	vivado $(VIVADO_DIR)/shrv32.xpr \
+	vivado $(VIVADO_DIR)/hpicorv32.xpr \
 		-log $(VIVADO_DIR)/gui.log \
 		-journal $(VIVADO_DIR)/gui.jou &
 
