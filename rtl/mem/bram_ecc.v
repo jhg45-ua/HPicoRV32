@@ -30,42 +30,42 @@ module bram_ecc #(
   localparam [2:0] ST_RMW_READ = 3'd3;
   localparam [2:0] ST_RMW_WRITE = 3'd4;
 
-  reg  [          2:0] state;
-  reg  [ADDR_BITS-1:0] addr_q;
-  reg  [          3:0] wstrb_q;
-  reg  [         31:0] wdata_q;
-  reg  [         31:0] rmw_base_q;  // Palabra previa ya decodificada para mezcla RMW
-  reg  [         38:0] scrub_word_q;  // Palabra de 39b reparada para reescribir en ST_SCRUB
+  reg [2:0] state;
+  reg [ADDR_BITS-1:0] addr_q;
+  reg [3:0] wstrb_q;
+  reg [31:0] wdata_q;
+  reg [31:0] rmw_base_q;  // Palabra previa ya decodificada para mezcla RMW
+  reg [38:0] scrub_word_q;  // Palabra de 39b reparada para reescribir en ST_SCRUB
 
-    // Señales combinacionales hacia memoria (BRAM RTL de 39b o IP Vivado de 32b+ECC)
-  reg                  bram_en;
-  reg                  bram_we;
-  reg  [ADDR_BITS-1:0] bram_addr;
-  reg  [         38:0] bram_wdata;
-  wire [         38:0] bram_rdata;
-  wire [         38:0] enc_word;
+  // Señales combinacionales hacia memoria (BRAM RTL de 39b o IP Vivado de 32b+ECC)
+  reg bram_en;
+  reg bram_we;
+  reg [ADDR_BITS-1:0] bram_addr;
+  reg [38:0] bram_wdata;
+  wire [38:0] bram_rdata;
+  wire [38:0] enc_word;
 
   // Mezcla combinacional por bytes para sb/sh (compartida por backend RTL y Vivado IP)
   wire [31:0] rmw_merged_data = {
-      wstrb_q[3] ? wdata_q[31:24] : rmw_base_q[31:24],
-      wstrb_q[2] ? wdata_q[23:16] : rmw_base_q[23:16],
-      wstrb_q[1] ? wdata_q[15:8]  : rmw_base_q[15:8],
-      wstrb_q[0] ? wdata_q[7:0]   : rmw_base_q[7:0]
+    wstrb_q[3] ? wdata_q[31:24] : rmw_base_q[31:24],
+    wstrb_q[2] ? wdata_q[23:16] : rmw_base_q[23:16],
+    wstrb_q[1] ? wdata_q[15:8] : rmw_base_q[15:8],
+    wstrb_q[0] ? wdata_q[7:0] : rmw_base_q[7:0]
   };
   wire [31:0] enc_data_in = (state == ST_RMW_WRITE) ? rmw_merged_data : wdata_i;
 
   wire [31:0] dec_data;
-  wire [ 6:0] dec_ecc;
-  wire        dec_sbiterr;
-  wire        dec_dbiterr;
+  wire [6:0] dec_ecc;
+  wire dec_sbiterr;
+  wire dec_dbiterr;
 
   // En síntesis Vivado (VIVADO_ECC_IP), DMEM usa blk_mem_gen con Soft ECC; IMEM y sim usan RTL
 `ifdef VIVADO_ECC_IP
   generate
     if (!READ_ONLY && (WORDS == 2048) && (ADDR_BITS == 11)) begin : gen_vivado_soft_ecc
       wire [31:0] ip_dina = (state == ST_SCRUB) ? scrub_word_q[31:0] : enc_data_in;
-      wire        ip_wea  = bram_en && bram_we;
-      wire        ip_enb  = bram_en && !bram_we;
+      wire        ip_wea = bram_en && bram_we;
+      wire        ip_enb = bram_en && !bram_we;
 
       blk_mem_gen_dmem_ecc u_ip (
           .clka     (clk),
