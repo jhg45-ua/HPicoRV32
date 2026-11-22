@@ -8,6 +8,7 @@ set repo_root  [file normalize "$script_dir/../.."]
 set proj_dir   "$repo_root/build/vivado"
 set proj_name  "hpicorv32"
 set part_name  "xc7a100tcsg324-1"
+# Selector FI recibido por -tclargs (0 = vuelo limpio en soc; 1 = demo en placa en soc_fi_top)
 set fi_mode    0
 if {[info exists argv] && [llength $argv] > 0 && [lindex $argv 0] == 1} {
     set fi_mode 1
@@ -55,13 +56,16 @@ set ip_props [list \
     CONFIG.register_porta_input_of_softecc {false} \
     CONFIG.register_portb_output_of_softecc {false} \
 ]
+# Si FI=1, conserva la misma IP Soft ECC pero habilita sus pines oficiales de inyección
+# (.injectsbiterr y .injectdbiterr) para poder provocar errores SBE/DBE reales en placa.
 if {$fi_mode == 1} {
     lappend ip_props CONFIG.Use_Error_Injection_Pins {true} CONFIG.Error_Injection_Type {Single_and_Double_Bit_Error_Injection}
 }
 set_property -dict $ip_props [get_ips blk_mem_gen_dmem_ecc]
 generate_target {synthesis simulation} [get_ips blk_mem_gen_dmem_ecc]
 
-# En síntesis (sources_1) DMEM usa la IP ECC de Vivado; en sim_1 usa RTL para inyección XOR
+# En síntesis (sources_1) DMEM usa la IP ECC de Vivado; en sim_1 usa RTL para inyección XOR.
+# FI=1 añade VIVADO_ECC_IP_FI=1 y cambia el módulo raíz y el .xdc a la versión con switches/BTNC.
 if {$fi_mode == 1} {
     set_property verilog_define {VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1 VIVADO_ECC_IP_FI=1} [get_filesets sources_1]
     set top_module "soc_fi_top"

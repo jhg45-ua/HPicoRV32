@@ -1,19 +1,20 @@
 # ==============================================================================
 # Proyecto: HPicoRV32 (Hardened PicoRV32)
 # Archivo:  Nexys-A7-100T-FI.xdc — Pines Nexys A7 para modo laboratorio FI=1
+# Nota:     Sintaxis compatible tanto con Vivado como con nextpnr-xilinx (openXC7).
 # ==============================================================================
 
-# Oscilador principal de 100 MHz
+# Oscilador principal de 100 MHz (periodo 10.00 ns)
 set_property -dict { PACKAGE_PIN E3    IOSTANDARD LVCMOS33 } [get_ports {clk}]
 create_clock -add -name sys_clk_pin -period 10.00 -waveform {0 5} [get_ports {clk}]
 
 # Botón rojo CPU_RESETN (activo bajo)
 set_property -dict { PACKAGE_PIN C12   IOSTANDARD LVCMOS33 } [get_ports {resetn}]
 
-# LED de error / trampa de la CPU (LED 15)
+# LED de error / trampa de la CPU (LED 15 rojo: DBE ECC, salto W^X o trap CPU)
 set_property -dict { PACKAGE_PIN V11   IOSTANDARD LVCMOS33 } [get_ports {trap}]
 
-# LEDs de usuario 0..14
+# LEDs de usuario 0..14 (contador o progreso de prueba)
 set_property -dict { PACKAGE_PIN H17   IOSTANDARD LVCMOS33 } [get_ports {leds[0]}]
 set_property -dict { PACKAGE_PIN K15   IOSTANDARD LVCMOS33 } [get_ports {leds[1]}]
 set_property -dict { PACKAGE_PIN J13   IOSTANDARD LVCMOS33 } [get_ports {leds[2]}]
@@ -34,7 +35,11 @@ set_property -dict { PACKAGE_PIN V12   IOSTANDARD LVCMOS33 } [get_ports {leds[14
 set_property -dict { PACKAGE_PIN D4    IOSTANDARD LVCMOS33 } [get_ports {ser_tx}]
 set_property -dict { PACKAGE_PIN C4    IOSTANDARD LVCMOS33 } [get_ports {ser_rx}]
 
-# Switches SW[4:0] y botón central BTNC para inyección de fallos en placa
+# Controles físicos del inyector en la Nexys A7 (FI=1):
+# - sw[2:0] (J15, L16, M13): objetivo a atacar (0..4=TMR CPU, 5=cpuregs, 6=IMEM, 7=DMEM)
+# - sw[3]   (R15)          : 0 = fallo simple recuperable (SBE/1 rep); 1 = fatal (DBE/MBU/W^X)
+# - sw[4]   (R17)          : 0 = disparo manual con BTNC; 1 = campaña autónoma LFSR (10 fallos/s)
+# - btnc    (N17)          : botón central para disparar 1 fallo manual (con debouncer 10 ms)
 set_property -dict { PACKAGE_PIN J15   IOSTANDARD LVCMOS33 } [get_ports {sw[0]}]
 set_property -dict { PACKAGE_PIN L16   IOSTANDARD LVCMOS33 } [get_ports {sw[1]}]
 set_property -dict { PACKAGE_PIN M13   IOSTANDARD LVCMOS33 } [get_ports {sw[2]}]

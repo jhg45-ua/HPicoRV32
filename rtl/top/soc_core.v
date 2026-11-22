@@ -80,12 +80,18 @@ module soc_core #(
   wire uart_dat_sel = mem_valid && (mem_addr == 32'h2000_0008);
   wire ecc_stat_sel = mem_valid && (mem_addr[31:4] == 28'h3000_000) && (mem_addr[1:0] == 2'b00);
 
-  // Habilidad global de inyección (nunca en POR ni con el SoC en estado trap)
+  // ---------------------------------------------------------------------------
+  // Repartidor del bus de inyección FI hacia CPU (0..5), IMEM (6) y DMEM (7)
+  // - Bloqueamos inyecciones en POR (!sys_resetn) y cuando ya hubo trap (!trap)
+  //   para no falsear la telemetría ni inyectar con el procesador detenido.
+  // - Si ENABLE_FI=0 (como en soc.v), el sintetizador simplifica todo a 0.
+  // ---------------------------------------------------------------------------
   wire fi_en_eff = ENABLE_FI && fi_valid_i && sys_resetn && !trap;
   wire cpu_fi_ack;
   wire imem_fi_ack;
   wire dmem_fi_ack;
 
+  // Combinamos los 3 ACKs con OR porque fi_target_i solo activa un módulo a la vez
   assign fi_ack_o = ENABLE_FI ? (cpu_fi_ack | imem_fi_ack | dmem_fi_ack) : 1'b0;
 
   // Núcleo HPicoRV32 (RV32I) con TMR selectivo (PC/control) y ECC en cpuregs

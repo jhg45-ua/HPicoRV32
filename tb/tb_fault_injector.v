@@ -67,7 +67,7 @@ module tb_fault_injector;
       .fi_timeout_o  (fi_timeout_o)
   );
 
-  // Cuenta bits a 1 en una máscara de 39b (Verilog-2001 portable, sin $countones)
+  // Cuenta bits a 1 en una máscara de 39b (para verificar que SBE=1 bit y DBE=2 bits)
   function integer popcount39;
     input [38:0] vec;
     integer k;
@@ -77,6 +77,7 @@ module tb_fault_injector;
     end
   endfunction
 
+  // Cuenta cuántas réplicas TMR (de 0 a 3) selecciona fi_rep_mask_o
   function integer popcount3;
     input [2:0] vec;
     begin
@@ -84,7 +85,7 @@ module tb_fault_injector;
     end
   endfunction
 
-  // Máscara de bits válidos según el ancho físico de cada objetivo
+  // Devuelve los bits que realmente existen en cada módulo destino (para detectar bits fuera de rango)
   function [38:0] legal_mask;
     input [3:0] tgt;
     input ecc_en;
@@ -224,7 +225,7 @@ module tb_fault_injector;
     $dumpfile("build/dump.vcd");
     $dumpvars(0, tb_fault_injector);
 
-    // T1: Reset limpio + guarda contra semilla 0
+    // T1: Reset limpio + protección contra semilla 0 (si seed=0 debe cargar DEFAULT_SEED)
     apply_reset;
     if (fi_valid_o !== 1'b0 || inj_count_o !== 32'd0 || fi_timeout_o !== 1'b0) begin
       $display("[FAIL T1a] Estado inicial tras reset incorrecto");
@@ -241,7 +242,7 @@ module tb_fault_injector;
     @(negedge clk);
     seed_load_i    = 1'b0;
 
-    // T2: Disparo dirigido con pulso largo (3 ciclos) y ack inmediato (1 ciclo)
+    // T2: Disparo dirigido con pulso largo (3 ciclos) -> debe disparar 1 sola vez por flanco
     auto_ack_imm   = 1'b1;
     cfg_target_i   = 4'd0;
     cfg_rep_mask_i = 3'b010;
@@ -271,7 +272,7 @@ module tb_fault_injector;
     trig_i       = 1'b0;
     auto_ack_imm = 1'b0;
 
-    // T3: Disparo dirigido con ack diferido (8 ciclos esperando ventana DMEM)
+    // T3: Handshake con ack diferido (simula espera hasta que DMEM/cpuregs realice un acceso)
     @(negedge clk);
     cfg_target_i   = 4'd7;
     cfg_rep_mask_i = 3'b001;

@@ -211,7 +211,8 @@ module picorv32 #(
 	reg  [31:0] next_reg_next_pc;
 	wire        tmr_pc_err;
 
-	// Habilitacion base de inyeccion de fallos (nunca en reset ni en estado trap)
+	// Habilitacion base de inyeccion de fallos (siempre bloqueada en reset o si ya hubo trap,
+	// para no corromper el estado parado ni falsear contadores). Si ENABLE_FI=0 se optimiza a 0.
 	wire        fi_active_base = ENABLE_FI && fi_valid_i && resetn && !trap;
 
 	// Instancia los votadores 2-de-3 en síntesis si ENABLE_TMR=1; en caso contrario pasa r0 directo
@@ -657,6 +658,7 @@ module picorv32 #(
 		end
 	end
 
+	// Ventana FI para mem_state (target 3): siempre activa mientras la FSM de memoria se actualiza
 	wire fi_hit_mem_state = fi_active_base && (fi_target_i == 4'd3) && (|fi_rep_mask_i);
 
 	always @(posedge clk) begin
@@ -739,7 +741,9 @@ module picorv32 #(
 		if (clear_prefetched_high_word)
 			prefetched_high_word <= 0;
 
-		// Captura el próximo estado de memoria en las 3 réplicas (o solo r0 si ENABLE_TMR=0)
+		// Captura el próximo estado de memoria en las 3 réplicas (o solo r0 si ENABLE_TMR=0).
+		// La inyección se hace como XOR en la entrada D del flip-flop justo al guardar next_mem_state;
+		// en el ciclo siguiente el votador TMR detecta la réplica alterada y el self-healing la repara.
 		if (ENABLE_TMR) begin
 			mem_state_r0 <= next_mem_state ^ ((fi_hit_mem_state && fi_rep_mask_i[0]) ? fi_bit_mask_i[1:0] : 2'b00);
 			mem_state_r1 <= next_mem_state ^ ((fi_hit_mem_state && fi_rep_mask_i[1]) ? fi_bit_mask_i[1:0] : 2'b00);
@@ -1194,7 +1198,9 @@ module picorv32 #(
 			                   (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000000100000010)) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
 			instr_rdinstr  <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11000000001000000010) && ENABLE_COUNTERS;
 			instr_rdinstrh <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000001000000010) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
-			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010 (devuelven 0 si ENABLE_TMR=0)
+			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010.
+			// Se decodifican siempre (sin && ENABLE_TMR/ECC) y devuelven 0 si el módulo está apagado,
+			// para poder correr el mismo firmware en pruebas de ablación sin saltar a trap por ILLINSN.
 			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010});
 			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010});
 			// Decodifica csrr rd, 0xCC2 (ECC reg SBU) y 0xCC3 (ECC reg DBU) (devuelven 0 si ENABLE_ECC=0)
@@ -1597,6 +1603,9 @@ module picorv32 #(
 	                       (cpu_state != cpu_state_trap) && !cpuregs_scrub1 &&
 	                       (|cpuregs_raddr2) && regs_sbe2;
 
+	// Inyección en cpuregs (target 5): en lugar de añadir un 2º puerto de escritura (que rompería
+	// las 14 LUTRAMs RAM32M en Artix-7), inyectamos por XOR justo cuando la CPU escribe rd (cpuregs_cpu_wen).
+	// Nota de timing: cpuregs_wrdata_inj no incluye cpuregs_cpu_wen porque cpuregs_wdata_final ya lo selecciona.
 	wire                     cpuregs_wen_final   = cpuregs_cpu_wen | cpuregs_scrub1 | cpuregs_scrub2;
 	wire                     fi_hit_cpuregs      = fi_active_base && (cpu_state != cpu_state_trap) &&
 	                                               (fi_target_i == 4'd5) && cpuregs_cpu_wen;
@@ -1668,13 +1677,15 @@ module picorv32 #(
 	wire fi_hit_cpuregs = 1'b0;
 `endif
 
-	// Ventanas de inyección FI en registros TMR del camino PC/control
+	// Ventanas de inyección FI en registros TMR del camino PC/control (targets 0..4) y ACK unificado
+	// Exigimos cpu_state != cpu_state_trap para no corromper registros con la CPU detenida.
 	wire fi_active_cpu     = fi_active_base && (cpu_state != cpu_state_trap);
 	wire fi_hit_pc         = fi_active_cpu && (fi_target_i == 4'd0) && (|fi_rep_mask_i);
 	wire fi_hit_next_pc    = fi_active_cpu && (fi_target_i == 4'd1) && (|fi_rep_mask_i);
 	wire fi_hit_cpu_state  = fi_active_cpu && (fi_target_i == 4'd2) && (|fi_rep_mask_i);
 	wire fi_hit_latched_rd = fi_active_cpu && (fi_target_i == 4'd4) && (|fi_rep_mask_i);
 
+	// Cualquier registro TMR activo o escritura en cpuregs confirma al inyector en el mismo ciclo
 	assign fi_ack_o = fi_hit_pc | fi_hit_next_pc | fi_hit_cpu_state |
 	                  fi_hit_mem_state | fi_hit_latched_rd | fi_hit_cpuregs;
 
@@ -1946,13 +1957,13 @@ module picorv32 #(
 						next_cpu_state = cpu_state_fetch;
 					end
 					
-					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1)
+					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1); si ENABLE_TMR=0 devuelve 0 fijo
 					is_rdtmr: begin
 						reg_out <= ENABLE_TMR ? (instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl) : 32'd0;
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
-					// Lectura de contadores ECC de cpuregs (CSRRS 0xCC2 / 0xCC3)
+					// Lectura de contadores ECC de cpuregs (CSRRS 0xCC2 / 0xCC3); si ENABLE_ECC=0 devuelve 0 fijo
 					is_rdecc: begin
 						reg_out <= ENABLE_ECC ? (instr_rdecc_reg_sbu ? count_ecc_reg_sbu : count_ecc_reg_dbu) : 32'd0;
 						latched_store <= 1;
@@ -2301,7 +2312,9 @@ module picorv32 #(
 			end
 		end
 
-		// Captura el próximo estado en las 3 réplicas de PC, FSM principal y rd (o solo r0 si ENABLE_TMR=0)
+		// Captura el próximo estado en las 3 réplicas de PC, FSM principal y rd (o solo r0 si ENABLE_TMR=0).
+		// En cada flanco, si fi_hit_* y fi_rep_mask_i[k] están a 1, invierte los bits de la máscara antes
+		// de grabar en el flip-flop; el votador TMR + next_* = voted repara cualquier SEU de 1 réplica en 1 ciclo.
 		if (ENABLE_TMR) begin
 			reg_pc_r0      <= next_reg_pc      ^ ((fi_hit_pc         && fi_rep_mask_i[0]) ? fi_bit_mask_i[31:0] : 32'h0);
 			reg_pc_r1      <= next_reg_pc      ^ ((fi_hit_pc         && fi_rep_mask_i[1]) ? fi_bit_mask_i[31:0] : 32'h0);

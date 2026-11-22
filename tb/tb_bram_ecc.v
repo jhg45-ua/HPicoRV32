@@ -301,8 +301,11 @@ module tb_bram_ecc;
     end else $display("[PASS] T6: READ_ONLY protege bus y realiza scrubbing");
 
     // 7. Inyeccion mediante puerto FI (ENABLE_FI=1 en dut_rw, ENABLE_FI=0 en dut_ro)
+    //    Comprueba que el saboteador XOR externo dispara scrubbing en SBE, alerta en DBE
+    //    y queda totalmente anulado si ENABLE_FI=0 (modo vuelo).
     do_rw(4'b1111, 6'd3, 32'hA5A5_5A5A, rd, sbe_c, dbe_c, cyc);
     @(negedge clk);
+    // 7a: SBE en bit 12 -> la lectura debe devolver el dato intacto (0xA5A5_5A5A) en 3 ciclos (con scrub)
     rw_fi_mask  = (39'd1 << 12);
     rw_fi_valid = 1'b1;
     do_rw(4'b0000, 6'd3, 32'h0, rd, sbe_c, dbe_c, cyc);
@@ -313,6 +316,7 @@ module tb_bram_ecc;
     end
 
     @(negedge clk);
+    // 7b: DBE en bits 0 y 1 -> debe activar dbe_o=1 sin colgar la transacción (2 ciclos)
     rw_fi_mask  = 39'h0000_0003;
     rw_fi_valid = 1'b1;
     do_rw(4'b0000, 6'd3, 32'h0, rd, sbe_c, dbe_c, cyc);
@@ -322,6 +326,7 @@ module tb_bram_ecc;
     end
 
     @(negedge clk);
+    // 7c: En dut_ro (ENABLE_FI=0) fi_valid=1 debe ignorarse por completo (ni falla ni da ack)
     ro_fi_valid = 1'b1;
     do_ro(4'b0000, 4'd0, 32'h0, rd, sbe_c, dbe_c);
     if (rd !== 32'h0000_0413 || sbe_c !== 0 || dbe_c !== 0 || ro_fi_ack !== 1'b0) begin
