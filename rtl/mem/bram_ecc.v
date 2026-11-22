@@ -65,7 +65,12 @@ module bram_ecc #(
   wire dec_sbiterr;
   wire dec_dbiterr;
 
-  // Saboteador RTL en lectura: solo consume en ST_READ/ST_RMW_READ (dec_* no se muestrea fuera)
+  // Saboteador RTL en lectura (usado en simulación, openXC7 e IMEM):
+  // - fi_hit_rtl solo vale 1 cuando la memoria entrega un dato leído (ST_READ o ST_RMW_READ),
+  //   avisando al inyector por fi_ack_o de que el bit-flip ya se consumió.
+  // - bram_rdata_eff hace XOR con fi_mask_i sin mirar 'state' porque fuera de esos dos estados
+  //   nadie muestrea dec_*; así sacamos 'state' del camino crítico del decodificador Hsiao.
+  // - Si ENABLE_FI=0 (modo vuelo), el sintetizador poda todo el XOR a un cable directo.
   wire fi_hit_rtl = ENABLE_FI && fi_valid_i && ((state == ST_READ) || (state == ST_RMW_READ));
   wire [38:0] bram_rdata_eff = bram_rdata ^ ((ENABLE_FI && fi_valid_i) ? fi_mask_i : 39'h0);
 
@@ -78,6 +83,10 @@ module bram_ecc #(
       wire        ip_enb = bram_en && !bram_we;
 
 `ifdef VIVADO_ECC_IP_FI
+      // Modo Vivado FI=1 conservando la IP oficial blk_mem_gen_dmem_ecc:
+      // La IP de Xilinx inyecta errores en el puerto de escritura (.injectsbiterr/.injectdbiterr)
+      // en lugar de en la lectura. Exigimos ip_wea && state != ST_SCRUB para no sabotear el scrubbing.
+      // Truco paridad (^fi_mask_i): 1 bit a '1' (SBE) da XOR impar (=1); 2 bits a '1' (DBE) da XOR par (=0).
       wire        fi_hit_ip = ENABLE_FI && fi_valid_i && ip_wea && (state != ST_SCRUB);
       wire        ip_inj_sbe = fi_hit_ip && (|fi_mask_i) && (^fi_mask_i);
       wire        ip_inj_dbe = fi_hit_ip && (|fi_mask_i) && !(^fi_mask_i);

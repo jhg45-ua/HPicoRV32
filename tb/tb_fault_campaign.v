@@ -22,10 +22,13 @@ module tb_fault_campaign #(
   reg clk = 1'b0;
   always #5 clk = ~clk;
 
-  // Selector entre DUT principal (u_soc) y referencia sin endurecimiento (u_base)
+  // Instanciamos DOS SoCs idénticos conectados al mismo fault_injector mediante mux:
+  //  - u_soc : DUT bajo prueba (por defecto TMR=1, REG_ECC=1).
+  //  - u_base: referencia sin endurecimiento (TMR=0, REG_ECC=0) para comparativa A/B.
+  // Ambos reciben la misma semilla LFSR e instantes de disparo para una comparación exacta.
   reg         active_base = 1'b0;
   reg         dut_resetn  = 1'b0;
-  wire        soc_resetn  = !active_base && dut_resetn;
+  wire        soc_resetn  = !active_base && dut_resetn;  // Mantiene en reset el SoC inactivo
   wire        base_resetn = active_base && dut_resetn;
 
   reg         inj_resetn     = 1'b0;
@@ -193,6 +196,9 @@ module tb_fault_campaign #(
     end
   endfunction
 
+  // Analizador sintáctico byte a byte sobre UART:
+  // Guarda los últimos 4 caracteres en key4 para reconocer "RESULT=0x..." y cada campo de
+  // "TELEM PC=... CTRL=... SBU=... DBU=... ISBU=... IDBU=... DSBU=... DDBU=..." al vuelo.
   task automatic parse_uart_char(input [7:0] ch);
     reg       is_hex;
     reg [3:0] nib;
@@ -275,6 +281,8 @@ module tb_fault_campaign #(
     end
   endtask
 
+  // Receptor serie asíncrono (UART RX) por software:
+  // Detecta el bit de start (ser_tx=0), espera medio bit para centrarse y muestrea los 8 bits + stop.
   task automatic step_uart_rx;
     begin
       case (urx_state)
@@ -332,6 +340,9 @@ module tb_fault_campaign #(
     end
   endtask
 
+  // Ejecuta una corrida completa del programa fi_bench sobre u_soc o u_base:
+  // Muestreamos en flanco de bajada @(negedge clk) para evitar carreras de eventos y eliminar
+  // retardos '#1' del bucle (duplica la velocidad de simulación en Verilator).
   task automatic run_once(
       input        use_base,
       input        enable_faults,
@@ -462,6 +473,8 @@ module tb_fault_campaign #(
 
       fi_enable       = 1'b0;
       fi_trig         = 1'b0;
+      // Muestreamos los flags internos de u_soc ANTES de bajar dut_resetn, porque el reset
+      // síncrono limpia trap, harv_fault_r, ecc_fault_r y los contadores de errores.
       run_inj_delta   = fi_inj_count - inj_start;
       run_cpu_trap    = u_soc.cpu_trap;
       run_harv_fault  = u_soc.harv_fault_r;
@@ -514,6 +527,9 @@ module tb_fault_campaign #(
       compute_span = (golden_compute_cycles * 65) / 100;
       if (compute_span < 100) compute_span = 100;
 
+      // En 10-SEU espaciamos las inyecciones un 5% de compute_cyc cada una (10 * 5% = 50% de la ventana)
+      // con un desfase inicial aleatorio, para que los 10 fallos quepan siempre dentro del cálculo.
+      // En 1-SEU elegimos un instante único entre el 0% y el 65% de la ventana de cómputo.
       for (r = 0; r < n_runs; r = r + 1) begin
         tb_lfsr = lfsr32_next(tb_lfsr);
         if (multi_seu) begin
@@ -548,6 +564,10 @@ module tb_fault_campaign #(
         inj_sum = inj_sum + run_inj_delta;
         if (run_inj_delta == 0) zero_inj_cnt = zero_inj_cnt + 1;
 
+        // Clasificación HARV automática:
+        //  - Hang    : superó 2*golden_cycles o cayó en trap inesperado.
+        //  - SDC     : terminó sin trap pero RESULT != golden_result (corrupción silenciosa).
+        //  - Match   : RESULT exacto; si algún contador HW subió (>0) fue Corregido, si no Latente.
         if (!run_done || run_trap || run_timeout) begin
           hang_cnt = hang_cnt + 1;
         end else if (rx_result !== golden_result) begin
@@ -600,6 +620,8 @@ module tb_fault_campaign #(
 
     // -------------------------------------------------------------------------
     // Etapa 0: Golden Run sin fallos
+    // Mide el resultado matemático exacto (golden_result), duración (golden_cycles)
+    // y ventana de cómputo para ajustar automáticamente los intervalos de inyección.
     // -------------------------------------------------------------------------
     run_once(1'b0, 1'b0, 1'b0, 1'b1, 1'b0, 32'd0, 32'd100, 16'd0,
              4'd0, 3'd0, 39'd0, 15'h0001, 5000000);
@@ -654,6 +676,8 @@ module tb_fault_campaign #(
 
     // -------------------------------------------------------------------------
     // Etapa 2: Verificacion dirigida de fallos fatales (DBE + Harvard W^X)
+    // Enciende de nuevo el VCD para poder inspeccionar estas trampas en Surfer.
+    // Cada prueba inyecta un fallo doble incorregible (2 bits o salto ilegal) y exige trap=1.
     // -------------------------------------------------------------------------
     $dumpon;
     if (ENABLE_REG_ECC) begin

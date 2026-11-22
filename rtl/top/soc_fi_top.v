@@ -30,7 +30,10 @@ module soc_fi_top #(
     input         btnc
 );
 
-  // POR idéntico al de soc_core para sincronizar el arranque del inyector
+  // ---------------------------------------------------------------------------
+  // 1. Power-On Reset (POR) local: mantiene sys_resetn a 0 los primeros 63 ciclos
+  //    para arrancar sincronizadores, debouncer e inyector en estado limpio.
+  // ---------------------------------------------------------------------------
   reg [5:0] reset_cnt = 6'd0;
   wire sys_resetn = &reset_cnt;
 
@@ -39,7 +42,12 @@ module soc_fi_top #(
     else if (!sys_resetn) reset_cnt <= reset_cnt + 6'd1;
   end
 
-  // Sincronizadores 2-FF para entradas asíncronas de placa (evita metaestabilidad)
+  // ---------------------------------------------------------------------------
+  // 2. Sincronizadores de 2 flip-flops (anti-metaestabilidad)
+  //    Los switches y botones de la Nexys A7 cambian sin relación con clk (100 MHz).
+  //    Si un cambio cae justo en la ventana de setup/hold del FF, su salida puede
+  //    quedar indecisa (metaestable). Dos FFs en serie dan 1 ciclo para estabilizarla.
+  // ---------------------------------------------------------------------------
   reg [4:0] sw_sync0_q;
   reg [4:0] sw_sync1_q;
   reg       btnc_sync0_q;
@@ -59,7 +67,12 @@ module soc_fi_top #(
     end
   end
 
-  // Filtro antirrebote (debouncer) sobre BTNC + detector de flanco de subida
+  // ---------------------------------------------------------------------------
+  // 3. Filtro antirrebote (debouncer) de 10 ms + detector de flanco para BTNC
+  //    Al pulsar un botón mecánico, los contactos rebotan varios milisegundos.
+  //    Solo aceptamos el nuevo estado cuando permanece igual 1,000,000 ciclos (10 ms).
+  //    btn_trig genera un pulso de exactamente 1 ciclo al pulsar el botón.
+  // ---------------------------------------------------------------------------
   localparam [31:0] DEB_LIM = (DEBOUNCE_CYCLES > 1) ? (DEBOUNCE_CYCLES - 1) : 32'd0;
   reg [31:0] deb_cnt_q;
   reg        btnc_state_q;
@@ -85,11 +98,17 @@ module soc_fi_top #(
   end
 
   wire        btn_trig = btnc_state_q && !btnc_prev_q;
-  wire [ 2:0] sw_target = sw_sync1_q[2:0];
-  wire        sw_dbe = sw_sync1_q[3];
-  wire        sw_auto = sw_sync1_q[4];
+  wire [ 2:0] sw_target = sw_sync1_q[2:0];  // Objetivo FI (0..7)
+  wire        sw_dbe = sw_sync1_q[3];       // 0 = corregible (SBE/1 rep); 1 = fatal (DBE/MBU/W^X)
+  wire        sw_auto = sw_sync1_q[4];      // 0 = manual por BTNC; 1 = autónomo continuo LFSR
 
-  // Configura máscara dirigida para demo en vivo (incluye salto W^X si sw_target=1 y sw_dbe=1)
+  // ---------------------------------------------------------------------------
+  // 4. Traductor de switches a máscara dirigida (para modo manual sw[4]=0)
+  //    - En targets TMR (0..4): sw_dbe=0 -> 1 réplica (3'b001); sw_dbe=1 -> 2 réplicas (3'b011)
+  //    - Caso especial W^X (sw_target=1 reg_next_pc + sw_dbe=1): ataca las 3 réplicas (3'b111)
+  //      con máscara 0x2000 para saltar a la zona DMEM y probar el trap Harvard W^X (LED15).
+  //    - En cpuregs/IMEM/DMEM (5..7): sw_dbe=0 -> 1 bit (39'h1); sw_dbe=1 -> 2 bits (39'h3).
+  // ---------------------------------------------------------------------------
   wire        is_tmr_sel = (sw_target <= 3'd4);
   wire [ 2:0] cfg_rep_mask = !sw_dbe ? 3'b001 :
                              (!is_tmr_sel ? 3'b001 : ((sw_target == 3'd1) ? 3'b111 : 3'b011));
@@ -103,7 +122,11 @@ module soc_fi_top #(
   wire [38:0] fi_bit_mask;
   wire        fi_ack;
 
-  // 20 ms de margen para que BTNC sobre DMEM no expire durante impresiones UART largas
+  // ---------------------------------------------------------------------------
+  // 5. Inyector de fallos físico
+  //    ACK_TIMEOUT = 2,000,000 ciclos (20 ms @ 100 MHz): margen suficiente para que
+  //    un disparo manual sobre DMEM espere sin caducar mientras counter imprime por UART (~11 ms).
+  // ---------------------------------------------------------------------------
   fault_injector #(
       .ACK_TIMEOUT(32'd2000000)
   ) u_injector (

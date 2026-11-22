@@ -22,6 +22,8 @@ module soc #(
     input         ser_rx   // Línea RX UART desde el puente USB-UART FTDI
 );
 
+  // Envoltorio limpio de vuelo: fija ENABLE_FI=0 y ata el bus FI a 0 para que
+  // síntesis pode el 100% de la lógica de inyección dejando solo los 6 pines físicos.
   soc_core #(
       .IMEM_WORDS    (IMEM_WORDS),
       .DMEM_WORDS    (DMEM_WORDS),

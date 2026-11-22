@@ -6,6 +6,7 @@ BUILD_DIR   := build
 VIVADO_DIR  := $(BUILD_DIR)/vivado
 OPENXC7_DIR := $(BUILD_DIR)/openxc7
 TCL_DIR     := fpga/nexys_a7
+# FI=0 genera el diseño limpio de vuelo (soc); FI=1 genera la demo interactiva en placa (soc_fi_top)
 FI          ?= 0
 ifeq ($(FI),1)
 SYNTH_TOP   := soc_fi_top
@@ -18,13 +19,15 @@ endif
 RTL_SRCS    := $(wildcard rtl/core/*.v rtl/mem/*.v rtl/periph/*.v rtl/top/*.v)
 TB          ?= tb/tb_soc.v
 APP         ?= counter
+# Si ejecutas tb_fault_campaign sin pasar APP= explícitamente, selecciona fi_bench automáticamente
 ifeq ($(origin APP),file)
 ifeq ($(filter tb/tb_fault_campaign.v,$(TB)),tb/tb_fault_campaign.v)
 override APP := fi_bench
 endif
 endif
-# Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY en simulación
+# Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY y acelerar UART en simulación
 SIM_FAST    ?= 0
+# Plusargs opcionales pasados al simulador (p. ej. SIM_ARGS="+NUM_RUNS=100")
 SIM_ARGS    ?=
 
 SYNTH       ?= vivado
@@ -63,8 +66,10 @@ help:
 
 sw:
 	@mkdir -p $(BUILD_DIR)
+# Fuerza recompilación (-B) para que cambiar entre SIM_FAST=0 y SIM_FAST=1 nunca deje un .hex obsoleto
 	$(MAKE) -B -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
 
+# Compila firmware automáticamente si el testbench carga build/firmware.hex (tb_soc o tb_fault_campaign)
 SIM_DEPS := $(if $(filter tb/tb_soc.v tb/tb_fault_campaign.v,$(TB)),sw,)
 sim: $(SIM_DEPS)
 	@mkdir -p $(BUILD_DIR)
@@ -109,6 +114,7 @@ synth: sw $(CHIPDB_BIN)
 	cd $(OPENXC7_DIR) && yosys -l yosys.log -Q \
 		-p 'hierarchy -check -top $(SYNTH_TOP); proc; setattr -set keep 1 a:keep %ci1 t:*dff* %i; synth_xilinx -flatten -abc9 -arch xc7 -top $(SYNTH_TOP); write_json soc.json' \
 		$(abspath $(RTL_SRCS))
+# --tmg-ripup re-enruta cables críticos que superen 10 ns (clave para que FI=1 cierre a 100 MHz)
 	nextpnr-xilinx --chipdb $(CHIPDB_BIN) \
 		--tmg-ripup \
 		--xdc $(XDC_FILE) \
