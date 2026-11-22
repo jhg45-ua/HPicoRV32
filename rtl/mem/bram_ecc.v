@@ -65,9 +65,9 @@ module bram_ecc #(
   wire dec_sbiterr;
   wire dec_dbiterr;
 
-  // Saboteador RTL en lectura (si ENABLE_FI=0, síntesis lo reduce a cable directo sin XOR)
+  // Saboteador RTL en lectura: solo consume en ST_READ/ST_RMW_READ (dec_* no se muestrea fuera)
   wire fi_hit_rtl = ENABLE_FI && fi_valid_i && ((state == ST_READ) || (state == ST_RMW_READ));
-  wire [38:0] bram_rdata_eff = bram_rdata ^ (fi_hit_rtl ? fi_mask_i : 39'h0);
+  wire [38:0] bram_rdata_eff = bram_rdata ^ ((ENABLE_FI && fi_valid_i) ? fi_mask_i : 39'h0);
 
   // En síntesis Vivado (VIVADO_ECC_IP), DMEM usa blk_mem_gen con Soft ECC; IMEM y sim usan RTL
 `ifdef VIVADO_ECC_IP

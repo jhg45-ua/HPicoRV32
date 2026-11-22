@@ -1600,7 +1600,7 @@ module picorv32 #(
 	wire                     cpuregs_wen_final   = cpuregs_cpu_wen | cpuregs_scrub1 | cpuregs_scrub2;
 	wire                     fi_hit_cpuregs      = fi_active_base && (cpu_state != cpu_state_trap) &&
 	                                               (fi_target_i == 4'd5) && cpuregs_cpu_wen;
-	wire [REG_WIDTH-1:0]     cpuregs_wrdata_inj  = fi_hit_cpuregs
+	wire [REG_WIDTH-1:0]     cpuregs_wrdata_inj  = (fi_active_base && (fi_target_i == 4'd5))
 	                                               ? (cpuregs_wrdata_enc ^ fi_bit_mask_i[REG_WIDTH-1:0])
 	                                               : cpuregs_wrdata_enc;
 	wire [regindex_bits-1:0] cpuregs_waddr       = cpuregs_cpu_wen ? latched_rd :

@@ -161,6 +161,7 @@ module fault_injector #(
   reg  [31:0] timer_q;
   reg  [15:0] auto_sent_q;
   reg         trig_q;
+  reg         armed_auto_q;
 
   wire        auto_active = enable_i && auto_mode_i;
   wire        trig_pulse = trig_i && !trig_q && !auto_mode_i;
@@ -176,6 +177,7 @@ module fault_injector #(
       timer_q       <= 32'd0;
       auto_sent_q   <= 16'd0;
       trig_q        <= 1'b0;
+      armed_auto_q  <= 1'b0;
       fi_valid_o    <= 1'b0;
       fi_target_o   <= 4'd0;
       fi_rep_mask_o <= 3'd0;
@@ -196,6 +198,7 @@ module fault_injector #(
             fi_rep_mask_o <= cfg_rep_mask_i;
             fi_bit_mask_o <= cfg_bit_mask_i;
             fi_valid_o    <= 1'b1;
+            armed_auto_q  <= 1'b0;
             timer_q       <= 32'd0;
             state_q       <= ST_ARMED;
           end else if (auto_active && budget_ok) begin
@@ -220,6 +223,7 @@ module fault_injector #(
             fi_rep_mask_o <= rand_rep_mask;
             fi_bit_mask_o <= rand_bit_mask;
             fi_valid_o    <= 1'b1;
+            armed_auto_q  <= 1'b1;
             auto_sent_q   <= auto_sent_q + 16'd1;
             timer_q       <= 32'd0;
             state_q       <= ST_ARMED;
@@ -230,6 +234,11 @@ module fault_injector #(
           if (fi_valid_o && fi_ack_i) begin
             fi_valid_o  <= 1'b0;
             inj_count_o <= inj_count_o + 32'd1;
+            timer_q     <= 32'd0;
+            state_q     <= ST_IDLE;
+          end else if (armed_auto_q && !auto_active) begin
+            // Aborta solicitud autónoma pendiente si se desactiva enable/auto_mode
+            fi_valid_o  <= 1'b0;
             timer_q     <= 32'd0;
             state_q     <= ST_IDLE;
           end else if ((ACK_TIMEOUT != 32'd0) && (timer_q >= TIMEOUT_LIM)) begin

@@ -26,7 +26,7 @@ open_run impl_1
 report_utilization    -file "$proj_dir/utilization.rpt"
 report_timing_summary -file "$proj_dir/timing.rpt"
 
-set bit_src "$proj_dir/${proj_name}.runs/impl_1/soc.bit"
+set bit_src "$proj_dir/${proj_name}.runs/impl_1/${top_module}.bit"
 set bit_dst "$proj_dir/hpicorv32.bit"
 file copy -force $bit_src $bit_dst
 

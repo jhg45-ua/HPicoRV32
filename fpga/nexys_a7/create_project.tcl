@@ -8,6 +8,10 @@ set repo_root  [file normalize "$script_dir/../.."]
 set proj_dir   "$repo_root/build/vivado"
 set proj_name  "hpicorv32"
 set part_name  "xc7a100tcsg324-1"
+set fi_mode    0
+if {[info exists argv] && [llength $argv] > 0 && [lindex $argv 0] == 1} {
+    set fi_mode 1
+}
 
 file mkdir $proj_dir
 
@@ -35,7 +39,7 @@ if {[file exists $hex_file]} {
 
 # IP oficial Block Memory Generator con Soft ECC para DMEM (2048x32b, Simple Dual-Port, sin .coe)
 create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_dmem_ecc
-set_property -dict [list \
+set ip_props [list \
     CONFIG.Memory_Type {Simple_Dual_Port_RAM} \
     CONFIG.Write_Width_A {32} \
     CONFIG.Write_Depth_A {2048} \
@@ -50,18 +54,29 @@ set_property -dict [list \
     CONFIG.Register_PortB_Output_of_Memory_Core {false} \
     CONFIG.register_porta_input_of_softecc {false} \
     CONFIG.register_portb_output_of_softecc {false} \
-] [get_ips blk_mem_gen_dmem_ecc]
+]
+if {$fi_mode == 1} {
+    lappend ip_props CONFIG.Use_Error_Injection_Pins {true} CONFIG.Error_Injection_Type {Single_and_Double_Bit_Error_Injection}
+}
+set_property -dict $ip_props [get_ips blk_mem_gen_dmem_ecc]
 generate_target {synthesis simulation} [get_ips blk_mem_gen_dmem_ecc]
 
 # En síntesis (sources_1) DMEM usa la IP ECC de Vivado; en sim_1 usa RTL para inyección XOR
-set_property verilog_define {VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1} [get_filesets sources_1]
+if {$fi_mode == 1} {
+    set_property verilog_define {VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1 VIVADO_ECC_IP_FI=1} [get_filesets sources_1]
+    set top_module "soc_fi_top"
+    set xdc_file "$script_dir/Nexys-A7-100T-FI.xdc"
+} else {
+    set_property verilog_define {VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1} [get_filesets sources_1]
+    set top_module "soc"
+    set xdc_file "$script_dir/Nexys-A7-100T-Master.xdc"
+}
 set_property verilog_define {VIVADO_MEM_INIT=1} [get_filesets sim_1]
 
 # Definir módulo raíz (Top-Level)
-set_property top soc [current_fileset]
+set_property top $top_module [current_fileset]
 
 # Añadir archivo de restricciones de la Nexys A7-100T
-set xdc_file "$script_dir/Nexys-A7-100T-Master.xdc"
 if {[file exists $xdc_file]} {
     add_files -fileset constrs_1 -norecurse $xdc_file
 }
