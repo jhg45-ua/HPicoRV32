@@ -18,8 +18,14 @@ endif
 RTL_SRCS    := $(wildcard rtl/core/*.v rtl/mem/*.v rtl/periph/*.v rtl/top/*.v)
 TB          ?= tb/tb_soc.v
 APP         ?= counter
+ifeq ($(origin APP),file)
+ifeq ($(filter tb/tb_fault_campaign.v,$(TB)),tb/tb_fault_campaign.v)
+override APP := fi_bench
+endif
+endif
 # Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY en simulación
 SIM_FAST    ?= 0
+SIM_ARGS    ?=
 
 SYNTH       ?= vivado
 FPGA_PART   := xc7a100tcsg324-1
@@ -57,18 +63,18 @@ help:
 
 sw:
 	@mkdir -p $(BUILD_DIR)
-	$(MAKE) -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
+	$(MAKE) -B -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
 
-SIM_DEPS := $(if $(filter tb/tb_soc.v,$(TB)),sw,)
+SIM_DEPS := $(if $(filter tb/tb_soc.v tb/tb_fault_campaign.v,$(TB)),sw,)
 sim: $(SIM_DEPS)
 	@mkdir -p $(BUILD_DIR)
 ifeq ($(SIM), verilator)
 	verilator --binary $(if $(filter 1,$(TRACE)),--trace,) -j 0 $(VLT_WARN_FLAGS) \
 		--Mdir $(BUILD_DIR)/vlt_$(TB_TOP) --top-module $(TB_TOP) $(TB) $(RTL_SRCS)
-	./$(BUILD_DIR)/vlt_$(TB_TOP)/V$(TB_TOP)
+	./$(BUILD_DIR)/vlt_$(TB_TOP)/V$(TB_TOP) $(SIM_ARGS)
 else ifeq ($(SIM), iverilog)
 	iverilog -g2001 -o $(BUILD_DIR)/sim.out $(TB) $(RTL_SRCS)
-	vvp $(BUILD_DIR)/sim.out
+	vvp $(BUILD_DIR)/sim.out $(SIM_ARGS)
 else
 	$(error Simulador no soportado: '$(SIM)'. Usa SIM=iverilog o SIM=verilator)
 endif
