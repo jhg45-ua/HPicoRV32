@@ -96,7 +96,8 @@ module picorv32 #(
 	parameter [31:0] PROGADDR_IRQ = 32'h 0000_0010,
 	parameter [31:0] STACKADDR = 32'h ffff_ffff,
 	parameter [ 0:0] ENABLE_TMR = 1,
-	parameter [ 0:0] ENABLE_ECC = 1
+	parameter [ 0:0] ENABLE_ECC = 1,
+	parameter [ 0:0] ENABLE_FI = 0
 ) (
 	input clk, resetn,
 	output reg trap,
@@ -167,7 +168,14 @@ module picorv32 #(
 
 	// Trace Interface
 	output reg        trace_valid,
-	output reg [35:0] trace_data
+	output reg [35:0] trace_data,
+
+	// Fault Injection Interface (solo activo cuando ENABLE_FI = 1)
+	input             fi_valid_i,
+	input      [ 3:0] fi_target_i,
+	input      [ 2:0] fi_rep_mask_i,
+	input      [38:0] fi_bit_mask_i,
+	output            fi_ack_o
 );
 	localparam integer irq_timer = 0;
 	localparam integer irq_ebreak = 1;
@@ -202,6 +210,9 @@ module picorv32 #(
 	reg  [31:0] next_reg_pc;
 	reg  [31:0] next_reg_next_pc;
 	wire        tmr_pc_err;
+
+	// Habilitacion base de inyeccion de fallos (nunca en reset ni en estado trap)
+	wire        fi_active_base = ENABLE_FI && fi_valid_i && resetn && !trap;
 
 	// Instancia los votadores 2-de-3 en síntesis si ENABLE_TMR=1; en caso contrario pasa r0 directo
 	generate
@@ -646,6 +657,8 @@ module picorv32 #(
 		end
 	end
 
+	wire fi_hit_mem_state = fi_active_base && (fi_target_i == 4'd3) && (|fi_rep_mask_i);
+
 	always @(posedge clk) begin
 		// Self-healing: recarga el estado votado si la FSM no transiciona este ciclo
 		next_mem_state = mem_state;
@@ -728,11 +741,11 @@ module picorv32 #(
 
 		// Captura el próximo estado de memoria en las 3 réplicas (o solo r0 si ENABLE_TMR=0)
 		if (ENABLE_TMR) begin
-			mem_state_r0 <= next_mem_state;
-			mem_state_r1 <= next_mem_state;
-			mem_state_r2 <= next_mem_state;
+			mem_state_r0 <= next_mem_state ^ ((fi_hit_mem_state && fi_rep_mask_i[0]) ? fi_bit_mask_i[1:0] : 2'b00);
+			mem_state_r1 <= next_mem_state ^ ((fi_hit_mem_state && fi_rep_mask_i[1]) ? fi_bit_mask_i[1:0] : 2'b00);
+			mem_state_r2 <= next_mem_state ^ ((fi_hit_mem_state && fi_rep_mask_i[2]) ? fi_bit_mask_i[1:0] : 2'b00);
 		end else begin
-			mem_state_r0 <= next_mem_state;
+			mem_state_r0 <= next_mem_state ^ (fi_hit_mem_state ? fi_bit_mask_i[1:0] : 2'b00);
 		end
 	end
 
@@ -1585,9 +1598,14 @@ module picorv32 #(
 	                       (|cpuregs_raddr2) && regs_sbe2;
 
 	wire                     cpuregs_wen_final   = cpuregs_cpu_wen | cpuregs_scrub1 | cpuregs_scrub2;
+	wire                     fi_hit_cpuregs      = fi_active_base && (cpu_state != cpu_state_trap) &&
+	                                               (fi_target_i == 4'd5) && cpuregs_cpu_wen;
+	wire [REG_WIDTH-1:0]     cpuregs_wrdata_inj  = fi_hit_cpuregs
+	                                               ? (cpuregs_wrdata_enc ^ fi_bit_mask_i[REG_WIDTH-1:0])
+	                                               : cpuregs_wrdata_enc;
 	wire [regindex_bits-1:0] cpuregs_waddr       = cpuregs_cpu_wen ? latched_rd :
 	                                               (cpuregs_scrub1 ? cpuregs_raddr1 : cpuregs_raddr2);
-	wire [REG_WIDTH-1:0]     cpuregs_wdata_final = cpuregs_cpu_wen ? cpuregs_wrdata_enc :
+	wire [REG_WIDTH-1:0]     cpuregs_wdata_final = cpuregs_cpu_wen ? cpuregs_wrdata_inj :
 	                                               (cpuregs_scrub1 ? cpuregs_scrub1_wdata : cpuregs_scrub2_wdata);
 
 	always @(posedge clk) begin
@@ -1645,9 +1663,20 @@ module picorv32 #(
 	end
 
 	// Con banco externo PICORV32_REGS no hay ECC interno en el modulo cpuregs
-	wire reg_sbe_event = 1'b0;
-	wire reg_dbe_event = 1'b0;
+	wire reg_sbe_event  = 1'b0;
+	wire reg_dbe_event  = 1'b0;
+	wire fi_hit_cpuregs = 1'b0;
 `endif
+
+	// Ventanas de inyección FI en registros TMR del camino PC/control
+	wire fi_active_cpu     = fi_active_base && (cpu_state != cpu_state_trap);
+	wire fi_hit_pc         = fi_active_cpu && (fi_target_i == 4'd0) && (|fi_rep_mask_i);
+	wire fi_hit_next_pc    = fi_active_cpu && (fi_target_i == 4'd1) && (|fi_rep_mask_i);
+	wire fi_hit_cpu_state  = fi_active_cpu && (fi_target_i == 4'd2) && (|fi_rep_mask_i);
+	wire fi_hit_latched_rd = fi_active_cpu && (fi_target_i == 4'd4) && (|fi_rep_mask_i);
+
+	assign fi_ack_o = fi_hit_pc | fi_hit_next_pc | fi_hit_cpu_state |
+	                  fi_hit_mem_state | fi_hit_latched_rd | fi_hit_cpuregs;
 
 	assign launch_next_insn = cpu_state == cpu_state_fetch && decoder_trigger && (!ENABLE_IRQ || irq_delay || irq_active || !(irq_pending & ~irq_mask));
 
@@ -2274,23 +2303,23 @@ module picorv32 #(
 
 		// Captura el próximo estado en las 3 réplicas de PC, FSM principal y rd (o solo r0 si ENABLE_TMR=0)
 		if (ENABLE_TMR) begin
-			reg_pc_r0      <= next_reg_pc;
-			reg_pc_r1      <= next_reg_pc;
-			reg_pc_r2      <= next_reg_pc;
-			reg_next_pc_r0 <= next_reg_next_pc;
-			reg_next_pc_r1 <= next_reg_next_pc;
-			reg_next_pc_r2 <= next_reg_next_pc;
-			cpu_state_r0   <= next_cpu_state;
-			cpu_state_r1   <= next_cpu_state;
-			cpu_state_r2   <= next_cpu_state;
-			latched_rd_r0  <= next_latched_rd;
-			latched_rd_r1  <= next_latched_rd;
-			latched_rd_r2  <= next_latched_rd;
+			reg_pc_r0      <= next_reg_pc      ^ ((fi_hit_pc         && fi_rep_mask_i[0]) ? fi_bit_mask_i[31:0] : 32'h0);
+			reg_pc_r1      <= next_reg_pc      ^ ((fi_hit_pc         && fi_rep_mask_i[1]) ? fi_bit_mask_i[31:0] : 32'h0);
+			reg_pc_r2      <= next_reg_pc      ^ ((fi_hit_pc         && fi_rep_mask_i[2]) ? fi_bit_mask_i[31:0] : 32'h0);
+			reg_next_pc_r0 <= next_reg_next_pc ^ ((fi_hit_next_pc    && fi_rep_mask_i[0]) ? fi_bit_mask_i[31:0] : 32'h0);
+			reg_next_pc_r1 <= next_reg_next_pc ^ ((fi_hit_next_pc    && fi_rep_mask_i[1]) ? fi_bit_mask_i[31:0] : 32'h0);
+			reg_next_pc_r2 <= next_reg_next_pc ^ ((fi_hit_next_pc    && fi_rep_mask_i[2]) ? fi_bit_mask_i[31:0] : 32'h0);
+			cpu_state_r0   <= next_cpu_state   ^ ((fi_hit_cpu_state  && fi_rep_mask_i[0]) ? fi_bit_mask_i[7:0]  : 8'h0);
+			cpu_state_r1   <= next_cpu_state   ^ ((fi_hit_cpu_state  && fi_rep_mask_i[1]) ? fi_bit_mask_i[7:0]  : 8'h0);
+			cpu_state_r2   <= next_cpu_state   ^ ((fi_hit_cpu_state  && fi_rep_mask_i[2]) ? fi_bit_mask_i[7:0]  : 8'h0);
+			latched_rd_r0  <= next_latched_rd  ^ ((fi_hit_latched_rd && fi_rep_mask_i[0]) ? fi_bit_mask_i[regindex_bits-1:0] : {regindex_bits{1'b0}});
+			latched_rd_r1  <= next_latched_rd  ^ ((fi_hit_latched_rd && fi_rep_mask_i[1]) ? fi_bit_mask_i[regindex_bits-1:0] : {regindex_bits{1'b0}});
+			latched_rd_r2  <= next_latched_rd  ^ ((fi_hit_latched_rd && fi_rep_mask_i[2]) ? fi_bit_mask_i[regindex_bits-1:0] : {regindex_bits{1'b0}});
 		end else begin
-			reg_pc_r0      <= next_reg_pc;
-			reg_next_pc_r0 <= next_reg_next_pc;
-			cpu_state_r0   <= next_cpu_state;
-			latched_rd_r0  <= next_latched_rd;
+			reg_pc_r0      <= next_reg_pc      ^ (fi_hit_pc         ? fi_bit_mask_i[31:0]              : 32'h0);
+			reg_next_pc_r0 <= next_reg_next_pc ^ (fi_hit_next_pc    ? fi_bit_mask_i[31:0]              : 32'h0);
+			cpu_state_r0   <= next_cpu_state   ^ (fi_hit_cpu_state  ? fi_bit_mask_i[7:0]               : 8'h0);
+			latched_rd_r0  <= next_latched_rd  ^ (fi_hit_latched_rd ? fi_bit_mask_i[regindex_bits-1:0] : {regindex_bits{1'b0}});
 		end
 
 		current_pc = 'bx;
