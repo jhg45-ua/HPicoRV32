@@ -335,3 +335,69 @@ Firmware de FPGA compilado con `SIM_FAST=0` (`.text = 908` B, `.data = 4` B, `.b
 - **Cero *latches* y preservación exacta 3× de TMR:** la inspección de `build/openxc7/soc.json` confirma `0` celdas `LDCE`/latch y las 3 réplicas exactas en los 5 registros protegidos (`reg_pc`: `32/32/32`, `reg_next_pc`: `32/32/32`, `cpu_state`: `8/8/8`, `latched_rd`: `5/5/5`, `mem_state`: `2/2/2`).
 - **Camino crítico:** `imem.u_bram.mem.0.2.DOADO6` $\rightarrow$ decodificador Hsiao (`imem.dec_sbiterr`) $\rightarrow$ `$auto$ff.cc:337:slice$17695.D` (`8.86 ns` totales: `3.60 ns` lógica + `5.26 ns` ruta, *slack* mínimo positivo `+1.14 ns` frente al periodo de `10.00 ns`).
 - **Coste de parametrización (`clog2` / `dmem_byte_off`):** `0` FFs, `0` `RAMB18E1`, `0` `RAM32M` y `0` `CARRY4` adicionales en Yosys.
+
+---
+
+## [2026-11-22] — Fase 1 (Tarea 1): Especificación del sistema de inyección de fallos desacoplado (`docs/fi-spec`)
+
+### Objetivo
+Definir la arquitectura, interfaz y metodología de verificación de un mecanismo de inyección de fallos desacoplado del SoC (válido tanto en simulación RTL como en hardware sobre la **Nexys A7-100T**), cerrando las decisiones de diseño de la Fase 1 y alineando el criterio de evaluación experimental con el artículo de referencia de **HARV** ([`harv_notes.md`](harv_notes.md#L190)).
+
+### Decisiones de arquitectura (Opción B — Inyector HW desacoplado)
+
+1. **Desacoplamiento del bus y aislamiento de vuelo (`soc` vs. `soc_core`):**
+   - El módulo inyector (`rtl/periph/fault_injector.v`) **no se conecta al bus de memoria/MMIO de `picorv32`** ni requiere colaboración del firmware bajo prueba, evitando el *efecto observador* y manteniendo el control del experimento aunque la CPU entre en `trap` o *hang*.
+   - Se extraerá el cuerpo actual de [`soc.v`](../rtl/top/soc.v) a `rtl/top/soc_core.v` con `parameter [0:0] ENABLE_FI = 1'b0` y el bus FI como puertos dedicados.
+   - [`soc.v`](../rtl/top/soc.v) permanecerá como *wrapper* de vuelo instanciando `soc_core #(.ENABLE_FI(1'b0))`, conservando intactos los 6 puertos físicos de [`Nexys-A7-100T-Master.xdc`](../fpga/nexys_a7/Nexys-A7-100T-Master.xdc) (`clk`, `resetn`, `trap`, `leds`, `ser_tx`, `ser_rx`) y garantizando **0 % de sobrecoste** en área, FFs, LUTRAM, BRAM y timing mediante `generate if (ENABLE_FI)`.
+   - Para pruebas en placa (`FI=1`), `rtl/top/soc_fi_top.v` instanciará `soc_core #(.ENABLE_FI(1'b1))` junto con `fault_injector`, mapeado a `SW[4:0]` y `BTNC` en `fpga/nexys_a7/Nexys-A7-100T-FI.xdc`.
+
+2. **Protocolo de *handshake* armado hasta consumo (`fi_valid` / `fi_ack`):**
+   - **Por qué hace falta:** los registros TMR se actualizan cada ciclo (`ack` inmediato), pero `cpuregs` solo se escribe cuando `cpuregs_cpu_wen = 1` y `imem`/`dmem` solo decodifican en `ST_READ`/`ST_RMW_READ`. Un pulso ciego de 1 ciclo se perdería casi siempre en DMEM o `cpuregs`.
+   - **Interfaz del bus FI hacia `soc_core`:**
+     - Entradas: `fi_valid_i`, `fi_target_i[3:0]`, `fi_rep_mask_i[2:0]`, `fi_bit_mask_i[38:0]`.
+     - Salida: `fi_ack_o` (pulso combinacional de 1 ciclo emitido por el objetivo cuando consume la inyección).
+   - **Temporización sin lazos combinacionales:** todas las salidas de `fault_injector.v` (`fi_valid_o`, `fi_target_o`, `fi_rep_mask_o`, `fi_bit_mask_o`) salen registradas en flip-flops (`ST_ARMED`). El objetivo activo devuelve `fi_ack_o = 1` de forma puramente combinacional a partir de `fi_valid_i` y su estado registrado; en el mismo `posedge clk`, el objetivo captura el *bit-flip* y `fault_injector` desarma `fi_valid_o <= 1'b0`.
+   - **Regla de seguridad (*gating*):** dentro de `soc_core` y `picorv32`, toda inyección se habilita únicamente bajo `sys_resetn && !trap && (cpu_state != cpu_state_trap)`, impidiendo corromper el POR de 63 ciclos o sacar a la CPU de un estado `trap`.
+
+3. **Mapa de objetivos (`fi_target[3:0]`) y ubicación exacta de cada saboteador XOR:**
+
+| `fi_target` | Módulo | Elemento objetivo | Ancho útil | Punto de inyección XOR | Modelo y comportamiento |
+| :---: | --- | --- | :---: | --- | --- |
+| `4'd0` | `picorv32` | `reg_pc_r0..r2` | `32` b | Entrada `D` (`next_reg_pc ^ mask`) | SEU/MBU en FF; ejercita votación + *self-healing* |
+| `4'd1` | `picorv32` | `reg_next_pc_r0..r2` | `32` b | Entrada `D` (`next_reg_next_pc ^ mask`) | SEU/MBU en FF; ejercita votación + *self-healing* |
+| `4'd2` | `picorv32` | `cpu_state_r0..r2` | `8` b | Entrada `D` (`next_cpu_state ^ mask`) | SEU/MBU en FSM principal (`!trap` y `!= trap`) |
+| `4'd3` | `picorv32` | `mem_state_r0..r2` | `2` b | Entrada `D` (`next_mem_state ^ mask`) | SEU/MBU en FSM de memoria |
+| `4'd4` | `picorv32` | `latched_rd_r0..r2` | `5` b | Entrada `D` (`next_latched_rd ^ mask`) | SEU/MBU en índice `rd` (`regindex_bits`) |
+| `4'd5` | `picorv32` | `cpuregs` (`32 × 39` b) | `39` b (`32` sin ECC) | `cpuregs_wrdata_enc ^ mask` en `cpuregs_cpu_wen` | Preserva 1 puerto `W` (`14 RAM32M`) y **0 ns** en lectura |
+| `4'd6` | `bram_ecc` | `imem` (`2048 × 39` b) | `39` b | `bram_rdata ^ mask` en `ST_READ` | SBE/DBE antes de `u_dec`; dispara `ST_SCRUB` / `trap` |
+| `4'd7` | `bram_ecc` | `dmem` (`2048 × 39` b) | `39` b | `bram_rdata ^ mask` en `ST_READ \|\| ST_RMW_READ` | SBE/DBE antes de `u_dec`; dispara `ST_SCRUB`, aborto RMW / `trap` |
+
+   - **Comparativa justa con `ENABLE_TMR = 0` / `ENABLE_REG_ECC = 0` (estilo HARV):**
+     - En objetivos TMR (`0..4`), si `ENABLE_TMR = 0` solo existe la copia física `_r0`, por lo que cualquier petición con `|fi_rep_mask_i` inyectará directamente sobre `_r0` (evitando falsos enmascaramientos al medir el diseño base sin proteger).
+     - En `cpuregs` (`4'd5`), cuando `ENABLE_ECC = 0` el banco mide `32` bits, acotando la posición aleatoria de bit al rango `[31:0]`.
+   - **Preservación de *timing* y LUTRAM:** al inyectar en `cpuregs_wrdata_enc` (camino de escritura) en lugar de `cpuregs_raw1/2` (camino de lectura asíncrona), se conserva la inferencia de `14 RAM32M` y no se degrada el camino crítico actual de lectura (`cpuregs -> u_dec_rs1 -> TMR`). En `imem`, las salidas registradas de `fault_injector` limitan el impacto en `bram_rdata` a 1 nivel XOR (solo cuando `ENABLE_FI = 1`).
+   - **Política `VIVADO_ECC_IP`:** la configuración de vuelo (`FI = 0`) mantiene `VIVADO_ECC_IP=1` en Vivado; la configuración de laboratorio en placa (`FI = 1`) sintetiza `dmem` con el backend RTL Hsiao portable (sin `blk_mem_gen_dmem_ecc`) para inyectar libremente cualquier patrón SBE/DBE sobre los 39 bits físicos.
+
+4. **Especificación funcional de `rtl/periph/fault_injector.v`:**
+   - **PRNG LFSR de 32 bits:** polinomio primitivo de longitud máxima ($x^{32} + x^{22} + x^2 + x + 1$) con semilla configurable garantizada distinta de cero tras reset.
+   - **Muestreo uniforme por rechazo (*rejection sampling*):** en `ST_IDLE`, descarta valores fuera de rango antes de armar `ST_ARMED` (`raw_bit >= 5` en `latched_rd`, `raw_bit >= 39` en ECC/BRAM, `raw_rep == 2'b11` en réplicas TMR y `raw_target >= 6` en perfil CPU-only), logrando distribución uniforme exacta sin sesgo ni divisores combinacionales.
+   - **Modos de disparo:**
+     - **Dirigido:** carga `(target, rep_mask, bit_mask)` externos al recibir pulso `trig_i`.
+     - **Autónomo (LFSR):** temporizador por `interval_cycles` y presupuesto `max_faults` (p. ej. `1` o `10` SEUs espaciados en el tiempo, o flujo continuo con `max_faults = 0` para demo en placa), más selección de perfil **CPU-only** (`0..5`, comparable a HARV) frente a **SoC completo** (`0..7`).
+   - **Soporte de fallos fatales dirigidos:** además de `1-SEU`/`10-SEU`, genera máscaras *two-hot* (2 bits distintos para DBE en `cpuregs`/IMEM/DMEM) y soporta salto forzado en `reg_pc` con `fi_rep_mask = 3'b111` hacia `0x0000_2000` para ejercitar la barrera Harvard `W^X` en hardware real.
+   - **Telemetría propia:** contador `inj_count_o` incrementado únicamente en `fi_valid_o && fi_ack_i`, más bandera `fi_timeout_o` si un objetivo pasivo no responde dentro del límite configurado.
+
+5. **Especificación de campaña automatizada en simulación (Hito 5, estilo HARV):**
+   - **Benchmark finito determinista (`sw/apps/fi_bench/main.c`):** implementación en C bare-metal del algoritmo **Sum of vectors** de HARV (dos arrays de `300` elementos `uint32_t` sumados en un tercer array en DMEM; `3 × 300 × 4 = 3600` B < `8192` B de DMEM) con salida UART separada en oráculo funcional (`RESULT=0xXXXXXXXX`) y telemetría (`TELEM PC=... CTRL=... SBU=... DBU=... ISBU=... IDBU=... DSBU=... DDBU=...`), finalizando con `REG_LEDS = 15'h7FFF`.
+   - **Banco de campaña (`tb/tb_fault_campaign.v`):**
+     - **Etapa 0 (*Golden run*):** mide `golden_cycles` y captura `golden_result` por UART sin inyecciones.
+     - **Etapa 1 (Campaña recuperable `1-SEU` y `10-SEU` espaciados):** `100` tiradas por defecto (`+NUM_RUNS=1000` en Verilator `TRACE=0`), comparando `ENABLE_TMR/REG_ECC` en `0` vs. `1` y perfil CPU-only vs. SoC completo.
+     - **Etapa 2 (Campaña fatal dirigida):** DBE en `cpuregs`, IMEM y DMEM + violación Harvard `W^X`, verificando `trap == 1` y telemetría `DBU`/`harv_fault_r` con reset entre tiradas.
+     - **Clasificación automática (Tabla 9 de HARV):** `Match` (subdividido en *Corrected/Masked* y *Latent*), `Mismatch` (SDC), `Hang` (> `2 × golden_cycles` o `trap` inesperado) y `Trap controlado` (solo Etapa 2).
+
+### Hoja de ruta de ejecución (Fase 1)
+1. **Hito 1 (`docs/fi-spec`):** Especificación técnica (*cerrado en esta entrada*).
+2. **Hito 2 (`feat/fault-injector`):** `rtl/periph/fault_injector.v` + `tb/tb_fault_injector.v`.
+3. **Hito 3 (`feat/soc-fi-hooks`):** Separación `soc`/`soc_core` + hooks `ENABLE_FI` en `picorv32.v` y `bram_ecc.v` + auditoría `0 % overhead` en `openXC7`.
+4. **Hito 4 (`feat/nexys-fi-demo`):** `rtl/top/soc_fi_top.v` + `Nexys-A7-100T-FI.xdc` + `FI=1` en `Makefile` + prueba en Nexys A7-100T.
+5. **Hito 5 (`tb/fault-campaign`):** `sw/apps/fi_bench/` + `tb/tb_fault_campaign.v` + métricas de campaña en `docs/logbook.md`.
