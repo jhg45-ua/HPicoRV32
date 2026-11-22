@@ -401,3 +401,48 @@ Definir la arquitectura, interfaz y metodología de verificación de un mecanism
 3. **Hito 3 (`feat/soc-fi-hooks`):** Separación `soc`/`soc_core` + hooks `ENABLE_FI` en `picorv32.v` y `bram_ecc.v` + auditoría `0 % overhead` en `openXC7`.
 4. **Hito 4 (`feat/nexys-fi-demo`):** `rtl/top/soc_fi_top.v` + `Nexys-A7-100T-FI.xdc` + `FI=1` en `Makefile` + prueba en Nexys A7-100T.
 5. **Hito 5 (`tb/fault-campaign`):** `sw/apps/fi_bench/` + `tb/tb_fault_campaign.v` + métricas de campaña en `docs/logbook.md`.
+
+---
+
+### Hitos 4 y 5 (Fase 1 Completa): Demo Nexys A7 (`FI=0/1`), Campaña HARV (1,000 corridas) y Ablación TMR×ECC
+
+- **Ramas integradas:** `feat/nexys-fi-demo` -> `main`, y cierre en `tb/fault-campaign` -> `main`.
+- **Revisión arquitectónica de `VIVADO_ECC_IP_FI` (Hito 4):**
+  - Se actualiza y sustituye la nota preliminar de Hito 1 que planteaba omitir `blk_mem_gen_dmem_ecc` cuando `FI=1`. Para mantener exactamente el mismo flujo de memoria IP de Xilinx en Vivado, [create_project.tcl](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/create_project.tcl) recibe `-tclargs $(FI)` desde el [Makefile](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/Makefile):
+    - `FI=0` (vuelo): top `soc`, [Nexys-A7-100T-Master.xdc](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/Nexys-A7-100T-Master.xdc) y defines `{VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1}`.
+    - `FI=1` (laboratorio): top `soc_fi_top`, [Nexys-A7-100T-FI.xdc](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/Nexys-A7-100T-FI.xdc) y defines `{VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1 VIVADO_ECC_IP_FI=1}`, activando en la IP `CONFIG.Use_Error_Injection_Pins {true}` y `CONFIG.Error_Injection_Type {Single_and_Double_Bit_Error_Injection}`.
+  - En [bram_ecc.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/rtl/mem/bram_ecc.v), la inyección bajo `VIVADO_ECC_IP_FI` ataca los pines `.injectsbiterr` y `.injectdbiterr` durante escrituras (`ip_wea && state != ST_SCRUB`), mientras que el backend RTL y simulación inyectan XOR combinacional en lectura (`ST_READ` / `ST_RMW_READ`).
+  - *Nota de verificación:* En este entorno macOS no hay instalación local de `vivado`, por lo que la integración de `VIVADO_ECC_IP=1` / `VIVADO_ECC_IP_FI=1` se verificó con `verilator --lint-only -Wall` contra un stub de `blk_mem_gen_dmem_ecc` (`0` errores), quedando la corrida batch completa de Vivado para la estación con Vivado.
+
+- **Implementación de demo en placa (Hito 4):**
+  - [soc_fi_top.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/rtl/top/soc_fi_top.v): sincronizadores 2-FF para entradas asíncronas `sw[4:0]` y `btnc`, debouncer de `10 ms` (`DEBOUNCE_CYCLES=1000000`), modo autónomo LFSR continuo a `10 fallos/s` (`AUTO_INTERVAL=32'd10000000`), `ACK_TIMEOUT=32'd2000000` (`20 ms`) para cubrir impresiones UART largas de `counter`, y disparo `W^X` al combinar `sw[3]=1` + `sw[2:0]=3'd1` (`reg_next_pc ^= 32'h0000_2000` en 3 réplicas).
+  - En [fault_injector.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/rtl/periph/fault_injector.v) se añadió `armed_auto_q` para abortar limpiamente `ST_ARMED -> ST_IDLE` si se baja `sw[4]` en placa antes de recibir ACK.
+  - **Cierre de temporización en `openXC7`:** al eliminar el acoplamiento de `state` del multiplexor de lectura ECC en `bram_ecc.v`, aligerar la carga de `cpuregs_cpu_wen` en `picorv32.v` y activar `--tmg-ripup` en `nextpnr-xilinx`:
+    - `FI=0` (`soc`): `106.97 MHz` (`PASS @ 100 MHz`, holgura `+652 ps`), bitstream generado.
+    - `FI=1` (`soc_fi_top`): `103.49 MHz` (`PASS @ 100 MHz`, holgura `+337 ps`), `1527` FFs (`1500 FDRE + 27 FDSE`), `14 RAM32M`, `10 RAMB18E1`, `198 CARRY4`, `0` latches y réplicas TMR preservadas (`96/96`, `96/96`, `24/24`, `6/6`, `15/15` redes distintas), bitstream generado.
+
+- **Benchmark y campaña HARV automatizada (Hito 5):**
+  - [fi_bench/main.c](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/sw/apps/fi_bench/main.c): *Sum of vectors* bare-metal de `300` elementos `uint32_t` (`vec_a`, `vec_b`, `vec_c` en DMEM + `.rodata` en IMEM + mezcla RMW `sb`/`sh`), rutina de entrada `__attribute__((naked))` que limpia `x1, x5..x31` para aislar corridas sucesivas sin fuga de SEUs latentes (`1288 B` `.text`, `16 B` `.data`, `3600 B` `.bss`). Emite `RESULT=0x01d3a7bf` y `TELEM ...` por UART antes de señalizar fin en `REG_LEDS=0x7FFF` (`118,720` ciclos totales, `78,758` de cómputo con `SIM_FAST=1`).
+  - [picorv32.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/rtl/core/picorv32.v): los CSRs de telemetría `0xCC0..0xCC3` devuelven `32'd0` cuando `ENABLE_TMR=0` o `ENABLE_ECC=0` (`0%` impacto con ambos habilitados), habilitando la matriz de ablación `ENABLE_TMR × ENABLE_REG_ECC` con el mismo firmware.
+  - [tb_fault_campaign.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/tb/tb_fault_campaign.v): muestreo síncrono en `@(negedge clk)`, receptor UART automático, Etapa 0 (`GOLDEN` y `GOLDEN-BASE`), Etapa 1 (`1-SEU` y `10-SEU` espaciados al `5%` del cómputo en perfiles CPU `0..5` y SoC `0..7`, más comparativa A/B pareada con `u_base`) y Etapa 2 (DBE dirigido en `cpuregs`, `IMEM`, `DMEM` y salto `W^X`).
+
+- **Resultados observados en campaña Verilator (`TRACE=0`, `fi_bench SIM_FAST=1`):**
+
+| Configuración (`TMR, REG_ECC`) | Perfil / Escenario | Corridas (`N`) | SEUs inyectados (`no-ack=0`) | `Match` (Correg. / Lat.) | `SDC` (`Mismatch`) | `Hang` |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **`(1,1)` Completo (`SOC_PROT`)** | `1-SEU CPU (0..5)` | `1000` | `1000` | **`1000` (`100.0%`)** (`1000` / `0`) | `0` | `0` |
+| **`(1,1)` Completo (`SOC_PROT`)** | `1-SEU ALL (0..7)` | `1000` | `1000` | **`1000` (`100.0%`)** (`1000` / `0`) | `0` | `0` |
+| **`(1,1)` Completo (`SOC_PROT`)** | `10-SEU CPU (0..5)` | `1000` | `10000` | **`1000` (`100.0%`)** (`1000` / `0`) | `0` | `0` |
+| **`(1,1)` Completo (`SOC_PROT`)** | `10-SEU ALL (0..7)` | `1000` | `10000` | **`1000` (`100.0%`)** (`1000` / `0`) | `0` | `0` |
+| `(1,0)` Solo TMR (`REG_ECC=0`) | `1-SEU CPU (0..5)` | `200` | `200` | `158` (`79.0%`) (`158` / `0`) | `33` (`16.5%`) | `9` (`4.5%`) |
+| `(1,0)` Solo TMR (`REG_ECC=0`) | `1-SEU ALL (0..7)` | `200` | `200` | `173` (`86.5%`) (`173` / `0`) | `25` (`12.5%`) | `2` (`1.0%`) |
+| `(1,0)` Solo TMR (`REG_ECC=0`) | `10-SEU CPU (0..5)` | `200` | `1897` | `44` (`22.0%`) (`44` / `0`) | `91` (`45.5%`) | `65` (`32.5%`) |
+| `(1,0)` Solo TMR (`REG_ECC=0`) | `10-SEU ALL (0..7)` | `200` | `1888` | `57` (`28.5%`) (`57` / `0`) | `112` (`56.0%`) | `31` (`15.5%`) |
+| `(0,1)` Solo Reg-ECC (`TMR=0`) | `1-SEU CPU (0..5)` | `200` | `200` | `82` (`41.0%`) (`24` / `58`) | `15` (`7.5%`) | `103` (`51.5%`) |
+| `(0,1)` Solo Reg-ECC (`TMR=0`) | `1-SEU ALL (0..7)` | `200` | `200` | `117` (`58.5%`) (`72` / `45`) | `17` (`8.5%`) | `66` (`33.0%`) |
+| `(0,1)` Solo Reg-ECC (`TMR=0`) | `10-SEU CPU (0..5)` | `200` | `1067` | `1` (`0.5%`) (`1` / `0`) | `3` (`1.5%`) | `196` (`98.0%`) |
+| `(0,1)` Solo Reg-ECC (`TMR=0`) | `10-SEU ALL (0..7)` | `200` | `815` | `1` (`0.5%`) (`1` / `0`) | `2` (`1.0%`) | `197` (`98.5%`) |
+| `(0,0)` Baseline sin TMR/Reg-ECC | `1-SEU CPU (0..5)` | `1000` | `1000` | `297` (`29.7%`) (`0` / `297`) | `215` (`21.5%`) | `488` (`48.8%`) |
+| `(0,0)` Baseline sin TMR/Reg-ECC | `10-SEU CPU (0..5)` | `1000` | `5256` | `0` (`0.0%`) (`0` / `0`) | `5` (`0.5%`) | `995` (`99.5%`) |
+
+- **Etapa 2 (fallos fatales dirigidos sobre `(1,1)`):** `cpuregs` DBE (`cpu_trap=1, reg_dbu=1`), `IMEM` DBE (`ecc_fault_r=1, imem_dbu=1`), `DMEM` DBE (`ecc_fault_r=1, dmem_dbu=1`) y salto `W^X` en `reg_next_pc -> 0x2000` (`harv_fault_r=1`), todos con `trap=1` controlado. En Icarus Verilog (`+NUM_RUNS=10`), también pasó todas las etapas (`0 SDC`, `0 Hang` en `SOC_PROT`, `build/dump.vcd` de `330 MB`).

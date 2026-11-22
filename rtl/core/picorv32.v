@@ -1194,12 +1194,12 @@ module picorv32 #(
 			                   (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000000100000010)) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
 			instr_rdinstr  <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11000000001000000010) && ENABLE_COUNTERS;
 			instr_rdinstrh <=  (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == 'b11001000001000000010) && ENABLE_COUNTERS && ENABLE_COUNTERS64;
-			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010
-			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010}) && ENABLE_TMR;
-			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010}) && ENABLE_TMR;
-			// Decodifica csrr rd, 0xCC2 (ECC reg SBU) y 0xCC3 (ECC reg DBU)
-			instr_rdecc_reg_sbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC2, 5'd0, 3'b010}) && ENABLE_ECC;
-			instr_rdecc_reg_dbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC3, 5'd0, 3'b010}) && ENABLE_ECC;
+			// Decodifica csrr rd, 0xCC0 (PC) y 0xCC1 (control): CSRRS con rs1=x0 y funct3=010 (devuelven 0 si ENABLE_TMR=0)
+			instr_rdtmr_pc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC0, 5'd0, 3'b010});
+			instr_rdtmr_ctrl <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC1, 5'd0, 3'b010});
+			// Decodifica csrr rd, 0xCC2 (ECC reg SBU) y 0xCC3 (ECC reg DBU) (devuelven 0 si ENABLE_ECC=0)
+			instr_rdecc_reg_sbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC2, 5'd0, 3'b010});
+			instr_rdecc_reg_dbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC3, 5'd0, 3'b010});
 
 			instr_ecall_ebreak <= ((mem_rdata_q[6:0] == 7'b1110011 && !mem_rdata_q[31:21] && !mem_rdata_q[19:7]) ||
 					(COMPRESSED_ISA && mem_rdata_q[15:0] == 16'h9002));
@@ -1620,8 +1620,8 @@ module picorv32 #(
 	wire reg_sbe_event = ENABLE_ECC && (cpuregs_scrub1 || cpuregs_scrub2);
 	wire reg_instr_no_rs1 = is_lui_auipc_jal ||
 			(ENABLE_COUNTERS && is_rdcycle_rdcycleh_rdinstr_rdinstrh) ||
-			(ENABLE_TMR && is_rdtmr) ||
-			(ENABLE_ECC && is_rdecc) ||
+			is_rdtmr ||
+			is_rdecc ||
 			(CATCH_ILLINSN && !WITH_PCPI && instr_trap);
 	wire reg_uses_rs1 = (cpu_state == cpu_state_ld_rs1) && !reg_instr_no_rs1 && (decoded_rs1 != 0);
 	wire reg_uses_rs2 = ((is_alu_reg_reg || is_beq_bne_blt_bge_bltu_bgeu || is_sb_sh_sw) && !instr_trap || (WITH_PCPI && instr_trap)) &&
@@ -1947,14 +1947,14 @@ module picorv32 #(
 					end
 					
 					// Lectura de contadores de errores TMR (CSRRS 0xCC0 / 0xCC1)
-					ENABLE_TMR && is_rdtmr: begin
-						reg_out <= instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl;
+					is_rdtmr: begin
+						reg_out <= ENABLE_TMR ? (instr_rdtmr_pc ? count_tmr_pc : count_tmr_ctrl) : 32'd0;
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
 					// Lectura de contadores ECC de cpuregs (CSRRS 0xCC2 / 0xCC3)
-					ENABLE_ECC && is_rdecc: begin
-						reg_out <= instr_rdecc_reg_sbu ? count_ecc_reg_sbu : count_ecc_reg_dbu;
+					is_rdecc: begin
+						reg_out <= ENABLE_ECC ? (instr_rdecc_reg_sbu ? count_ecc_reg_sbu : count_ecc_reg_dbu) : 32'd0;
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
