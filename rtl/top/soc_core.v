@@ -95,7 +95,18 @@ module soc_core #(
   assign fi_ack_o = ENABLE_FI ? (cpu_fi_ack | imem_fi_ack | dmem_fi_ack) : 1'b0;
 
   // Núcleo HPicoRV32 (RV32I) con TMR selectivo (PC/control) y ECC en cpuregs
-  wire cpu_trap;
+  wire        cpu_trap;
+  wire [31:0] imem_rdata;
+  wire        imem_ready;
+  wire        imem_sbe;
+  wire        imem_dbe;
+  wire [31:0] dmem_rdata;
+  wire        dmem_ready;
+  wire        dmem_sbe;
+  wire        dmem_dbe;
+  reg         harv_fault_r;  // Registro enclavado (sticky FF) de violación W^X
+  reg         ecc_fault_r;   // Registro enclavado (sticky FF) de DBE incorregible en IMEM o DMEM
+  reg         bus_ready_r;   // Pulso ready de 1 ciclo para periféricos MMIO y harv_err
 
   picorv32 #(
       .ENABLE_COUNTERS     (1),
@@ -112,38 +123,41 @@ module soc_core #(
       .ENABLE_ECC          (ENABLE_REG_ECC),
       .ENABLE_FI           (ENABLE_FI)
   ) cpu (
-      .clk          (clk),
-      .resetn       (sys_resetn),
-      .trap         (cpu_trap),
-      .mem_valid    (mem_valid),
-      .mem_instr    (mem_instr),
-      .mem_ready    (mem_ready),
-      .mem_addr     (mem_addr),
-      .mem_wdata    (mem_wdata),
-      .mem_wstrb    (mem_wstrb),
-      .mem_rdata    (mem_rdata),
-      .mem_la_read  (),
-      .mem_la_write (),
-      .mem_la_addr  (),
-      .mem_la_wdata (),
-      .mem_la_wstrb (),
-      .pcpi_valid   (),
-      .pcpi_insn    (),
-      .pcpi_rs1     (),
-      .pcpi_rs2     (),
-      .pcpi_wr      (1'b0),
-      .pcpi_rd      (32'h0),
-      .pcpi_wait    (1'b0),
-      .pcpi_ready   (1'b0),
-      .irq          (32'h0),
-      .eoi          (),
-      .trace_valid  (),
-      .trace_data   (),
-      .fi_valid_i   (fi_en_eff),
-      .fi_target_i  (fi_target_i),
-      .fi_rep_mask_i(fi_rep_mask_i),
-      .fi_bit_mask_i(fi_bit_mask_i),
-      .fi_ack_o     (cpu_fi_ack)
+      .clk           (clk),
+      .resetn        (sys_resetn),
+      .trap          (cpu_trap),
+      .mem_valid     (mem_valid),
+      .mem_instr     (mem_instr),
+      .mem_ready     (mem_ready),
+      .mem_addr      (mem_addr),
+      .mem_wdata     (mem_wdata),
+      .mem_wstrb     (mem_wstrb),
+      .mem_rdata     (mem_rdata),
+      .mem_la_read   (),
+      .mem_la_write  (),
+      .mem_la_addr   (),
+      .mem_la_wdata  (),
+      .mem_la_wstrb  (),
+      .pcpi_valid    (),
+      .pcpi_insn     (),
+      .pcpi_rs1      (),
+      .pcpi_rs2      (),
+      .pcpi_wr       (1'b0),
+      .pcpi_rd       (32'h0),
+      .pcpi_wait     (1'b0),
+      .pcpi_ready    (1'b0),
+      .irq           (32'h0),
+      .eoi           (),
+      .trace_valid   (),
+      .trace_data    (),
+      .fi_valid_i    (fi_en_eff),
+      .fi_target_i   (fi_target_i),
+      .fi_rep_mask_i (fi_rep_mask_i),
+      .fi_bit_mask_i (fi_bit_mask_i),
+      .fi_ack_o      (cpu_fi_ack),
+      .bus_harv_err_i(harv_err && bus_ready_r),
+      .bus_imem_dbe_i(imem_dbe),
+      .bus_dmem_dbe_i(dmem_dbe)
   );
 
   wire [IMEM_ADDR_BITS-1:0] imem_word_addr = mem_addr[IMEM_ADDR_BITS+1:2];
@@ -151,11 +165,6 @@ module soc_core #(
   wire [DMEM_ADDR_BITS-1:0] dmem_word_addr = dmem_byte_off[DMEM_ADDR_BITS+1:2];
 
   // IMEM: 8 KB con Hsiao SEC-DED (READ_ONLY=1 desde bus, pero con auto-scrubbing interno)
-  wire [31:0] imem_rdata;
-  wire        imem_ready;
-  wire        imem_sbe;
-  wire        imem_dbe;
-
   bram_ecc #(
       .WORDS    (IMEM_WORDS),
       .ADDR_BITS(IMEM_ADDR_BITS),
@@ -180,13 +189,6 @@ module soc_core #(
   );
 
   // DMEM: 8 KB con Hsiao SEC-DED + RMW para sb/sh y auto-scrubbing
-  wire [31:0] dmem_rdata;
-  wire        dmem_ready;
-  wire        dmem_sbe;
-  wire        dmem_dbe;
-  reg         harv_fault_r;  // Registro enclavado (sticky FF) de violación W^X
-  reg         ecc_fault_r;   // Registro enclavado (sticky FF) de DBE incorregible en IMEM o DMEM
-
   bram_ecc #(
       .WORDS    (DMEM_WORDS),
       .ADDR_BITS(DMEM_ADDR_BITS),
@@ -197,7 +199,7 @@ module soc_core #(
       .clk       (clk),
       .resetn    (sys_resetn),
       .valid_i   (dmem_sel),
-      .wstrb_i   ((harv_fault_r || ecc_fault_r) ? 4'b0000 : mem_wstrb),
+      .wstrb_i   (cpu_trap ? 4'b0000 : mem_wstrb),
       .addr_i    (dmem_word_addr),
       .wdata_i   (mem_wdata),
       .rdata_o   (dmem_rdata),
@@ -236,7 +238,6 @@ module soc_core #(
   reg [31:0] count_ecc_dmem_sbu;
   reg [31:0] count_ecc_dmem_dbu;
 
-  reg        bus_ready_r;  // Pulso ready de 1 ciclo para periféricos MMIO y harv_err
   reg [31:0] mmio_rdata;
 
   // LED15 se enciende ante trampa de CPU, violación Harvard o DBE en memoria
@@ -272,7 +273,7 @@ module soc_core #(
           harv_fault_r <= 1'b1;
           bus_ready_r  <= 1'b1;
         end else if (leds_sel) begin
-          if ((|mem_wstrb) && !harv_fault_r && !ecc_fault_r) leds <= mem_wdata[14:0];
+          if ((|mem_wstrb) && !cpu_trap) leds <= mem_wdata[14:0];
           mmio_rdata  <= {17'b0, leds};
           bus_ready_r <= 1'b1;
         end else if (uart_div_sel) begin
