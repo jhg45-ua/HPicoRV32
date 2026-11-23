@@ -12,22 +12,18 @@ module bram_ecc #(
     parameter integer       ADDR_BITS = 11,
     parameter         [0:0] READ_ONLY = 1'b0,
     parameter         [0:0] USE_INIT  = 1'b0,
-    parameter               INIT_FILE = "build/firmware.hex",
-    parameter         [0:0] ENABLE_FI = 1'b0
+    parameter               INIT_FILE = "build/firmware.hex"
 ) (
-    input                      clk,         // Reloj del sistema (flanco de subida)
-    input                      resetn,      // Reset síncrono activo bajo (solo FSM y salidas)
-    input                      valid_i,     // Solicitud activa desde el bus del SoC
-    input      [          3:0] wstrb_i,     // 4'b0000 = lectura; 4'b1111 = sw; otro = RMW sb/sh
-    input      [ADDR_BITS-1:0] addr_i,      // Dirección de palabra
-    input      [         31:0] wdata_i,     // Dato de escritura (32 bits)
-    output reg [         31:0] rdata_o,     // Dato decodificado y registrado (válido con ready_o)
-    output reg                 ready_o,     // Pulso síncrono de 1 ciclo al completar transacción
-    output reg                 sbe_o,       // Pulso de 1 ciclo: error simple corregido (+ scrub)
-    output reg                 dbe_o,       // Pulso de 1 ciclo: error doble incorregible (fatal)
-    input                      fi_valid_i,  // Solicitud armada de inyección (si ENABLE_FI=1)
-    input      [         38:0] fi_mask_i,   // Máscara XOR de 39 bits (SBE/DBE)
-    output                     fi_ack_o     // Pulso combinacional de consumo hacia el inyector
+    input                      clk,      // Reloj del sistema (flanco de subida)
+    input                      resetn,   // Reset síncrono activo bajo (solo FSM y salidas)
+    input                      valid_i,  // Solicitud activa desde el bus del SoC
+    input      [          3:0] wstrb_i,  // 4'b0000 = lectura; 4'b1111 = sw; otro = RMW sb/sh
+    input      [ADDR_BITS-1:0] addr_i,   // Dirección de palabra
+    input      [         31:0] wdata_i,  // Dato de escritura (32 bits)
+    output reg [         31:0] rdata_o,  // Dato decodificado y registrado (válido con ready_o)
+    output reg                 ready_o,  // Pulso síncrono de 1 ciclo al completar transacción
+    output reg                 sbe_o,    // Pulso de 1 ciclo: error simple corregido (+ scrub)
+    output reg                 dbe_o     // Pulso de 1 ciclo: error doble incorregible (fatal)
 );
 
   localparam [2:0] ST_IDLE = 3'd0;
@@ -65,15 +61,6 @@ module bram_ecc #(
   wire dec_sbiterr;
   wire dec_dbiterr;
 
-  // Saboteador RTL en lectura (usado en simulación, openXC7 e IMEM):
-  // - fi_hit_rtl solo vale 1 cuando la memoria entrega un dato leído (ST_READ o ST_RMW_READ),
-  //   avisando al inyector por fi_ack_o de que el bit-flip ya se consumió.
-  // - bram_rdata_eff hace XOR con fi_mask_i sin mirar 'state' porque fuera de esos dos estados
-  //   nadie muestrea dec_*; así sacamos 'state' del camino crítico del decodificador Hsiao.
-  // - Si ENABLE_FI=0 (modo vuelo), el sintetizador poda todo el XOR a un cable directo.
-  wire fi_hit_rtl = ENABLE_FI && fi_valid_i && ((state == ST_READ) || (state == ST_RMW_READ));
-  wire [38:0] bram_rdata_eff = bram_rdata ^ ((ENABLE_FI && fi_valid_i) ? fi_mask_i : 39'h0);
-
   // En síntesis Vivado (VIVADO_ECC_IP), DMEM usa blk_mem_gen con Soft ECC; IMEM y sim usan RTL
 `ifdef VIVADO_ECC_IP
   generate
@@ -82,29 +69,12 @@ module bram_ecc #(
       wire        ip_wea = bram_en && bram_we;
       wire        ip_enb = bram_en && !bram_we;
 
-`ifdef VIVADO_ECC_IP_FI
-      // Modo Vivado FI=1 conservando la IP oficial blk_mem_gen_dmem_ecc:
-      // La IP de Xilinx inyecta errores en el puerto de escritura (.injectsbiterr/.injectdbiterr)
-      // en lugar de en la lectura. Exigimos ip_wea && state != ST_SCRUB para no sabotear el scrubbing.
-      // Truco paridad (^fi_mask_i): 1 bit a '1' (SBE) da XOR impar (=1); 2 bits a '1' (DBE) da XOR par (=0).
-      wire        fi_hit_ip = ENABLE_FI && fi_valid_i && ip_wea && (state != ST_SCRUB);
-      wire        ip_inj_sbe = fi_hit_ip && (|fi_mask_i) && (^fi_mask_i);
-      wire        ip_inj_dbe = fi_hit_ip && (|fi_mask_i) && !(^fi_mask_i);
-      assign fi_ack_o = fi_hit_ip;
-`else
-      assign fi_ack_o = 1'b0;
-`endif
-
       blk_mem_gen_dmem_ecc u_ip (
           .clka     (clk),
           .ena      (ip_wea),
           .wea      (ip_wea),
           .addra    (bram_addr),
           .dina     (ip_dina),
-`ifdef VIVADO_ECC_IP_FI
-          .injectsbiterr(ip_inj_sbe),
-          .injectdbiterr(ip_inj_dbe),
-`endif
           .clkb     (clk),
           .enb      (ip_enb),
           .addrb    (bram_addr),
@@ -119,14 +89,12 @@ module bram_ecc #(
       assign dec_ecc    = 7'h0;
     end else begin : gen_rtl_ecc
       ecc_secded_dec u_dec (
-          .encoded_i(bram_rdata_eff),
+          .encoded_i(bram_rdata),
           .data_o   (dec_data),
           .ecc_o    (dec_ecc),
           .sbiterr_o(dec_sbiterr),
           .dbiterr_o(dec_dbiterr)
       );
-
-      assign fi_ack_o = fi_hit_rtl;
 
       ecc_secded_enc u_enc (
           .data_i   (enc_data_in),
@@ -153,14 +121,12 @@ module bram_ecc #(
   endgenerate
 `else
   ecc_secded_dec u_dec (
-      .encoded_i(bram_rdata_eff),
+      .encoded_i(bram_rdata),
       .data_o   (dec_data),
       .ecc_o    (dec_ecc),
       .sbiterr_o(dec_sbiterr),
       .dbiterr_o(dec_dbiterr)
   );
-
-  assign fi_ack_o = fi_hit_rtl;
 
   ecc_secded_enc u_enc (
       .data_i   (enc_data_in),

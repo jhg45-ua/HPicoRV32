@@ -6,28 +6,14 @@ BUILD_DIR   := build
 VIVADO_DIR  := $(BUILD_DIR)/vivado
 OPENXC7_DIR := $(BUILD_DIR)/openxc7
 TCL_DIR     := fpga/nexys_a7
-# FI=0 genera el diseño limpio de vuelo (soc); FI=1 genera la demo interactiva en placa (soc_fi_top)
-FI          ?= 0
-ifeq ($(FI),1)
-SYNTH_TOP   := soc_fi_top
-XDC_FILE    := $(TCL_DIR)/Nexys-A7-100T-FI.xdc
-else
-SYNTH_TOP   := soc
 XDC_FILE    := $(TCL_DIR)/Nexys-A7-100T-Master.xdc
-endif
 
 RTL_SRCS    := $(wildcard rtl/core/*.v rtl/mem/*.v rtl/periph/*.v rtl/top/*.v)
 TB          ?= tb/tb_soc.v
 APP         ?= counter
-# Si ejecutas tb_fault_campaign sin pasar APP= explícitamente, selecciona fi_bench automáticamente
-ifeq ($(origin APP),file)
-ifeq ($(filter tb/tb_fault_campaign.v,$(TB)),tb/tb_fault_campaign.v)
-override APP := fi_bench
-endif
-endif
 # Si vale 1, define -DSIM_FAST en sw/Makefile para acortar HEARTBEAT_DELAY y acelerar UART en simulación
 SIM_FAST    ?= 0
-# Plusargs opcionales pasados al simulador (p. ej. SIM_ARGS="+NUM_RUNS=100")
+# Plusargs opcionales pasados al simulador
 SIM_ARGS    ?=
 
 SYNTH       ?= vivado
@@ -58,19 +44,17 @@ help:
 	@echo "  make sw [APP=counter] [SIM_FAST=1|0]                   -> Compila sw/apps/<APP> y genera build/firmware.hex"
 	@echo "  make sim [TB=...] [APP=...] [SIM=iverilog|verilator] [TRACE=1|0] -> Compila firmware y simula RTL"
 	@echo "  make wave                                              -> Abre build/dump.vcd en Surfer"
-	@echo "  make lint                                              -> Comprueba sintaxis y reglas RTL con Verilator (soc y soc_fi_top)"
-	@echo "  make synth [SYNTH=vivado|openxc7] [FI=0|1]             -> Síntesis, P&R y bitstream (FI=1: demo Nexys A7)"
-	@echo "  make vivado-gui [FI=0|1]                               -> Genera el .xpr y abre la interfaz gráfica de Vivado"
+	@echo "  make lint                                              -> Comprueba sintaxis y reglas RTL con Verilator"
+	@echo "  make synth [SYNTH=vivado|openxc7]                      -> Síntesis, P&R y bitstream"
+	@echo "  make vivado-gui                                        -> Genera el .xpr y abre la interfaz gráfica de Vivado"
 	@echo "  make prog [SYNTH=vivado|openxc7]                       -> Programa la Nexys A7 usando openFPGALoader"
 	@echo "  make clean                                             -> Elimina la carpeta build/"
 
 sw:
 	@mkdir -p $(BUILD_DIR)
-# Fuerza recompilación (-B) para que cambiar entre SIM_FAST=0 y SIM_FAST=1 nunca deje un .hex obsoleto
-	$(MAKE) -B -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
+	$(MAKE) -C sw APP=$(APP) SIM_FAST=$(SIM_FAST)
 
-# Compila firmware automáticamente si el testbench carga build/firmware.hex (tb_soc o tb_fault_campaign)
-SIM_DEPS := $(if $(filter tb/tb_soc.v tb/tb_fault_campaign.v,$(TB)),sw,)
+SIM_DEPS := $(if $(filter tb/tb_soc.v,$(TB)),sw,)
 sim: $(SIM_DEPS)
 	@mkdir -p $(BUILD_DIR)
 ifeq ($(SIM), verilator)
@@ -89,7 +73,6 @@ wave:
 
 lint:
 	verilator --lint-only -Wall $(VLT_WARN_FLAGS) --top-module soc $(RTL_SRCS)
-	verilator --lint-only -Wall $(VLT_WARN_FLAGS) --top-module soc_fi_top $(RTL_SRCS)
 
 $(CHIPDB_BIN):
 	@if [ -z "$$NEXTPNR_XILINX_DIR" ] || [ -z "$$PRJXRAY_DB_DIR" ]; then \
@@ -112,11 +95,9 @@ synth: sw $(CHIPDB_BIN)
 	cp $(BUILD_DIR)/firmware.hex $(OPENXC7_DIR)/firmware.hex
 # Propaga 'keep' desde los registros TMR (* keep *) hacia sus celdas FF antes de opt_merge
 	cd $(OPENXC7_DIR) && yosys -l yosys.log -Q \
-		-p 'hierarchy -check -top $(SYNTH_TOP); proc; setattr -set keep 1 a:keep %ci1 t:*dff* %i; synth_xilinx -flatten -abc9 -arch xc7 -top $(SYNTH_TOP); write_json soc.json' \
+		-p 'hierarchy -check -top soc; proc; setattr -set keep 1 a:keep %ci1 t:*dff* %i; synth_xilinx -flatten -abc9 -arch xc7 -top soc; write_json soc.json' \
 		$(abspath $(RTL_SRCS))
-# --tmg-ripup re-enruta cables críticos que superen 10 ns (clave para que FI=1 cierre a 100 MHz)
 	nextpnr-xilinx --chipdb $(CHIPDB_BIN) \
-		--tmg-ripup \
 		--xdc $(XDC_FILE) \
 		--json $(OPENXC7_DIR)/soc.json \
 		--fasm $(OPENXC7_DIR)/soc.fasm \
@@ -132,7 +113,6 @@ synth: sw
 	@mkdir -p $(VIVADO_DIR)
 	vivado -mode batch \
 		-source $(TCL_DIR)/build.tcl \
-		-tclargs $(FI) \
 		-log $(VIVADO_DIR)/build.log \
 		-journal $(VIVADO_DIR)/build.jou
 endif
@@ -141,7 +121,6 @@ vivado-gui: sw
 	@mkdir -p $(VIVADO_DIR)
 	vivado -mode batch \
 		-source $(TCL_DIR)/create_project.tcl \
-		-tclargs $(FI) \
 		-log $(VIVADO_DIR)/create.log \
 		-journal $(VIVADO_DIR)/create.jou
 	vivado $(VIVADO_DIR)/hpicorv32.xpr \

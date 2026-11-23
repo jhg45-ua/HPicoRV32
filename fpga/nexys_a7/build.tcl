@@ -26,9 +26,7 @@ open_run impl_1
 report_utilization    -file "$proj_dir/utilization.rpt"
 report_timing_summary -file "$proj_dir/timing.rpt"
 
-# Toma top_module definido en create_project.tcl ('soc' si FI=0, 'soc_fi_top' si FI=1) y lo
-# copia a una ruta fija hpicorv32.bit para que 'make prog' lo encuentre siempre igual.
-set bit_src "$proj_dir/${proj_name}.runs/impl_1/${top_module}.bit"
+set bit_src "$proj_dir/${proj_name}.runs/impl_1/soc.bit"
 set bit_dst "$proj_dir/hpicorv32.bit"
 file copy -force $bit_src $bit_dst
 
