@@ -1,0 +1,13 @@
+{
+  "name": "Informe comparativo: HPicoRV32 frente a HARV",
+  "main_doc": "main.tex",
+  "engine": "xetex",
+  "color": "",
+  "kind": "",
+  "exports": [],
+  "hidden": false,
+  "forked_from": null,
+  "checkpoints": {
+    "mode": "engine_dependencies"
+  }
+}

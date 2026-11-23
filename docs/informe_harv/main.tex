@@ -1,0 +1,310 @@
+\documentclass[a4paper,10pt]{article}
+
+\usepackage[spanish,es-tabla,es-noshorthands]{babel}
+\usepackage[margin=2.1cm,top=2.2cm,bottom=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,tabularx,array,multirow}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  citecolor=blue!45!black,
+  urlcolor=blue!45!black,
+  pdftitle={Comparativa técnica entre HPicoRV32 y HARV},
+  pdfauthor={Proyecto HPicoRV32}
+]{hyperref}
+
+\definecolor{inkgray}{gray}{0.32}
+\definecolor{panelbg}{gray}{0.965}
+\definecolor{accentblue}{RGB}{24,64,116}
+\definecolor{warnred}{RGB}{150,35,35}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.42em}
+\setlength{\headheight}{13pt}
+\setlist{nosep,leftmargin=1.4em}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{4pt}
+
+\titleformat{\section}{\large\bfseries\color{accentblue}}{\thesection.}{0.5em}{}[\vspace{-0.3em}\rule{\textwidth}{0.4pt}]
+\titlespacing*{\section}{0pt}{1.0em}{0.4em}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection.}{0.5em}{}
+\titlespacing*{\subsection}{0pt}{0.7em}{0.25em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\footnotesize\color{inkgray}HPicoRV32 frente a HARV}
+\rhead{\footnotesize\color{inkgray}Comparativa técnica de endurecimiento RV32I}
+\cfoot{\footnotesize\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Comparativa técnica entre HPicoRV32 y HARV}\\[0.25em]
+  {\normalsize\color{inkgray} Granularidad TMR, votación y \textit{scrubbing}, ECC en registros/memorias, gestión de \textit{traps} y recursos en Artix-7}\\[0.35em]
+  {\footnotesize Proyecto HPicoRV32 \quad$\cdot$\quad Referencia \texttt{external/harv} (\texttt{xarc/harv}) \quad$\cdot$\quad Noviembre de 2026}
+\end{center}
+\vspace{-0.4em}
+\noindent\rule{\textwidth}{0.6pt}
+
+\begin{abstract}
+\vspace{-0.4em}
+\noindent Este documento compara las técnicas de tolerancia a fallos de \textbf{HPicoRV32} (derivado de PicoRV32 en Verilog-2001) frente al procesador de referencia \textbf{HARV} (VHDL)~\cite{santos2020dtis,harv_repo} sobre FPGA Xilinx Artix-7 (\texttt{xc7a100tcsg324-1}). El contraste abarca la granularidad del TMR, el comportamiento de votadores y \textit{scrubbing}, la codificación ECC de registros y memorias, el manejo de excepciones y las métricas de implementación y de inyección de fallos, explicitando los límites de comparabilidad entre ambos entornos.
+\end{abstract}
+
+\section{Arquitectura base y alcance del endurecimiento}
+
+HARV~\cite{santos2020dtis,harv_repo} es un núcleo RV32I escrito en VHDL con ejecución controlada por una máquina de estados de seis fases (\texttt{STAT\_IDLE}, \texttt{STAT\_REQ\_INSTR}, \texttt{STAT\_RUN}, \texttt{STAT\_DMEM\_STALL}, \texttt{STAT\_UPDATE\_PC}, \texttt{STAT\_TRAP}) y camino de datos combinacional encadenado entre \texttt{instr\_fetch}, \texttt{control}, \texttt{regfile}, \texttt{alu} y la actualización del contador de programa (PC). Por su parte, HPicoRV32 parte del núcleo multiciclo PicoRV32~\cite{picorv32} en Verilog-2001 y se integra directamente en un SoC completo con arquitectura Harvard y separación estricta \textit{Write XOR Execute} (\texttt{W\^{}X}): memoria de instrucciones de solo lectura por bus (\texttt{IMEM}, 8~KB), memoria de datos (\texttt{DMEM}, 8~KB), controlador UART y GPIO.
+
+En ambos proyectos la mitigación se configura en tiempo de elaboración mediante parámetros genéricos (\texttt{TMR\_CONTROL}, \texttt{TMR\_ALU}, \texttt{HAMMING\_PC} y \texttt{HAMMING\_REGFILE} en HARV; \texttt{ENABLE\_TMR} y \texttt{ENABLE\_REG\_ECC} en HPicoRV32). La diferencia de control radica en la conmutación en ejecución: HARV expone el registro CSR \texttt{harden\_conf\_r} (\texttt{0xBC0}) para activar o puentear cada técnica desde firmware con el objetivo de medir bajo haz el mismo \textit{bitstream}~\cite{santos2021dtis}. Sin embargo, en \texttt{csr.vhd} este registro carece de cláusula de \textit{reset} (si arranca a cero, la corrección empieza deshabilitada) y no posee redundancia, por lo que un único SEU en \texttt{0xBC0} desactiva el endurecimiento en vuelo. HPicoRV32 fija la protección en síntesis y separa la experimentación mediante el parámetro \texttt{ENABLE\_FI}: el diseño de vuelo (\texttt{FI=0}) elimina toda lógica de inyección con sobrecoste nulo. La Tabla~\ref{tab:arch} resume las diferencias estructurales.
+
+\begin{table}[htbp]
+  \centering
+  \footnotesize
+  \caption{Resumen arquitectónico de ambos diseños.}
+  \label{tab:arch}
+  \begin{tabularx}{\textwidth}{@{}lYY@{}}
+    \toprule
+    \textbf{Aspecto} & \textbf{HARV (\texttt{xarc/harv})} & \textbf{HPicoRV32} \\
+    \midrule
+    Lenguaje y base & VHDL, núcleo propio RV32I (sin sistema) & Verilog-2001, PicoRV32~\cite{picorv32} RV32I \\
+    Microarquitectura & Uniciclo/FSM de 6 estados sin segmentar & Multiciclo (8 estados en \texttt{cpu\_state}) \\
+    Alcance del proyecto & Núcleo aislado (memorias y SoC externos) & SoC completo (CPU, IMEM, DMEM, UART, GPIO) \\
+    Cobertura TMR & Bloques completos \texttt{control} y \texttt{alu} & Grano fino en 5 registros (79~FFs $\times 3$) \\
+    Cobertura ECC & PC, IR y \texttt{regfile} (Hamming estándar) & \texttt{cpuregs}, IMEM y DMEM (Hsiao 39,32) \\
+    Separación de bus & Puertos Harvard sin barrera \texttt{W\^{}X} interna & Harvard \texttt{W\^{}X} por hardware (\texttt{harv\_err}) \\
+    Control dinámico / FI & \textit{Bypass} runtime vía \texttt{0xBC0} (SPOF sin reset) & Fijado en síntesis; bus \texttt{ENABLE\_FI} desacoplado \\
+    Portabilidad & Vivado (\texttt{DONT\_TOUCH}) y Synplify/PolarFire & Vivado, \texttt{openXC7} (Yosys) y PolarFire \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{Granularidad del TMR y preservación en síntesis}
+
+HARV aplica una estrategia ``macro'' envolviendo módulos intactos sin modificar su RTL interno~\cite{santos2020dtis}:
+\begin{itemize}
+  \item \textbf{\texttt{control\_tmr.vhd}:} triplica tres instancias de \texttt{control}, replicando tanto los 3~FFs de estado \texttt{proc\_status\_r} como toda la lógica combinacional de decodificación, y vota sus 24 señales de salida.
+  \item \textbf{\texttt{alu\_tmr.vhd}:} triplica tres copias de la \texttt{alu} puramente combinacional y vota bit a bit \texttt{zero\_o} (1~b) y \texttt{data\_o} (32~b). Esta decisión protege frente a transitorios combinacionales (SET) y fallos en LUTs/CRAM, a costa de consumir 1\,559~LUTs solo en \texttt{alu\_tmr} y añadir dos etapas de votación consecutivas dentro del mismo ciclo.
+\end{itemize}
+Ni PC/IR (cubiertos con Hamming) ni el banco \texttt{csr.vhd} entran en el dominio TMR de HARV.
+
+HPicoRV32 adopta TMR selectivo de grano fino dentro de \texttt{rtl/core/picorv32.v}, triplicando únicamente los cinco registros secuenciales que gobiernan el flujo de control e interfaz de memoria: \texttt{reg\_pc} (32~b), \texttt{reg\_next\_pc} (32~b), \texttt{cpu\_state} (8~b), \texttt{mem\_state} (2~b) y \texttt{latched\_rd} (5~b), es decir, $79 \times 3 = 237$~FFs. La ALU y la lógica combinacional no se triplican. Esta elección recorta drásticamente el consumo de LUTs y permite cumplir los 100~MHz en el SoC, asumiendo como compromiso explícito que un pulso SET en la ALU combinacional no queda enmascarado si coincide con el flanco de captura.
+
+Para impedir que el sintetizador fusione réplicas idénticas, HARV anota cada instancia con el atributo \texttt{DONT\_TOUCH} (Vivado) y \texttt{syn\_radhardlevel="tmr"}, \texttt{syn\_keep}, \texttt{syn\_noprune} y \texttt{syn\_safe\_case} (Synplify para Microchip PolarFire). HPicoRV32 aplica atributos equivalentes a nivel de registro (\texttt{dont\_touch="true"}, \texttt{syn\_preserve=1}, \texttt{keep="true"}) y en el módulo votador (\texttt{tmr\_voter.v}: \texttt{keep}, \texttt{syn\_keep}). Además, dado que Yosys no propaga el atributo \texttt{keep} desde declaraciones \texttt{reg} hacia las celdas \texttt{DFF} tras \texttt{proc\_dff}, el flujo abierto \texttt{openXC7} ejecuta \texttt{setattr -set keep 1 a:keep \%ci1 t:*dff* \%i} antes de \texttt{synth\_xilinx}, verificando en \texttt{soc.json} las tres copias físicas exactas (\texttt{96/96/24/6/15} bits sin fusión).
+
+\section{Topología de votadores y \textit{scrubbing} (\textit{self-healing})}
+
+En la salida, ambos diseños utilizan votadores mayoritarios combinacionales bit a bit, $(r_0 \land r_1) \lor (r_0 \land r_2) \lor (r_1 \land r_2)$, sin triplicar el propio votador y acompañados de una red XOR simétrica que alimenta los contadores de discrepancias. En HARV, cada salida votada atraviesa además un multiplexor 2:1 controlado por \texttt{correct\_error\_i} (\texttt{harden\_conf\_r[4..5]}), añadiendo un nivel lógico adicional tras el votador. En \texttt{tmr\_voter.v} de HPicoRV32 el valor votado sale directamente sin multiplexor de \textit{bypass}.
+
+La diferencia funcional crítica reside en la realimentación del estado votado en máquinas secuenciales (Figura~\ref{fig:tmr_sh}):
+\begin{itemize}
+  \item \textbf{HARV sin \textit{self-healing}:} en \texttt{control\_tmr.vhd}, cada réplica calcula \texttt{next\_proc\_status\_w(i)} a partir de su propio registro interno \texttt{proc\_status\_r(i)}. Ante un SEU en la réplica~0, las réplicas 1 y 2 enmascaran el fallo hacia el resto del procesador, pero la réplica~0 nunca recupera el estado votado: diverge de forma permanente (o queda atascada en \texttt{STAT\_TRAP}) hasta un \textit{reset} global, incrementa de continuo el contador \texttt{0x7C8} y deja al sistema sin redundancia frente a un segundo SEU en otra copia.
+  \item \textbf{HPicoRV32 con \textit{self-healing} en 1 ciclo:} dentro de \texttt{always @(posedge clk)} en \texttt{picorv32.v}, cada ciclo precarga \texttt{next\_<reg> = <voted>} con la salida mayoritaria y actualiza simultáneamente las tres réplicas (\texttt{\_r0, \_r1, \_r2 <= next\_<reg>}). Cualquier discrepancia en un biestable se corrige automáticamente en el siguiente flanco de reloj sin ciclos de parada.
+\end{itemize}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    >= {Stealth[length=1.8mm,width=1.25mm]},
+    box/.style={draw=black,line width=0.65pt,rounded corners=2.5pt,align=center,font=\scriptsize,fill=white,inner sep=2.5pt},
+    panel/.style={draw=black!55,line width=0.65pt,rounded corners=4pt,fill=panelbg},
+    wire/.style={->,draw=black,line width=0.65pt},
+    fb/.style={->,draw=accentblue,line width=0.95pt}
+  ]
+    % Panel (a): HARV (0.0 .. 7.8)
+    \draw[panel] (0.0,0.0) rectangle (7.8,5.25);
+    \node[font=\footnotesize\bfseries] at (3.90,4.95) {(a) HARV: \texttt{control\_tmr.vhd} (sin \textit{self-healing})};
+
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (ha0) at (1.78,3.68) {\texttt{proc\_status\_r(0)}};
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (ha1) at (1.78,2.75) {\texttt{proc\_status\_r(1)}};
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (ha2) at (1.78,1.82) {\texttt{proc\_status\_r(2)}};
+
+    \foreach \n/\y in {ha0/3.68, ha1/2.75, ha2/1.82} {
+      \draw[wire,draw=warnred] (2.90,\y) -- (2.90,{\y+0.39}) -- (0.50,{\y+0.39}) -- (0.50,\y) -- (\n.west);
+    }
+    \node[font=\fontsize{6.0}{7.0}\selectfont,text=warnred] at (1.80,4.34) {bucle local: \texttt{next(i) <- r(i)}};
+
+    \draw (ha0.east) -- (3.14,3.68);
+    \draw (ha1.east) -- (3.14,2.75);
+    \draw (ha2.east) -- (3.14,1.82);
+    \draw (3.14,1.50) -- (3.14,3.68);
+    \fill (3.14,2.75) circle (1.1pt);
+    \fill (3.14,3.15) circle (1.1pt);
+
+    \node[box,minimum width=1.68cm,minimum height=1.08cm] (va) at (4.42,3.15) {\textbf{Votador}\\2-de-3\\(24 salidas)};
+    \node[box,minimum width=1.68cm,minimum height=0.70cm] (xa) at (4.42,1.50) {\textbf{Red XOR}\\CSR \texttt{0x7C8}};
+    \node[box,minimum width=1.30cm,minimum height=1.02cm] (ma) at (6.36,3.15) {\textbf{Mux 2:1}\\\textit{bypass}};
+    \node[box,minimum width=1.65cm,minimum height=0.70cm,draw=warnred] (ca) at (6.36,1.50) {\texttt{harden\_conf[4]}\\{\fontsize{5.8}{6.8}\selectfont\color{warnred}SPOF sin reset}};
+
+    \draw[wire] (3.14,3.15) -- (va.west);
+    \draw[wire] (3.14,1.50) -- (xa.west);
+    \draw[wire] (va.east) -- (ma.west);
+    \draw[wire,draw=warnred] (ca.north) -- (ma.south);
+    \draw[wire] (ma.east) -- (7.64,3.15);
+    \node[font=\fontsize{6.0}{7.0}\selectfont] at (7.36,3.38) {out};
+    \node[font=\fontsize{6.0}{7.0}\selectfont\itshape,text=warnred] at (3.90,0.45) {Un SEU en \texttt{\_r(i)} desincroniza la réplica hasta reset global.};
+
+    % Panel (b): HPicoRV32 (8.3 .. 16.1)
+    \draw[panel] (8.3,0.0) rectangle (16.1,5.25);
+    \node[font=\footnotesize\bfseries] at (12.20,4.95) {(b) HPicoRV32: TMR + \textit{self-healing} (1 ciclo)};
+
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (hb0) at (10.42,3.68) {\texttt{<reg>\_r0}};
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (hb1) at (10.42,2.75) {\texttt{<reg>\_r1}};
+    \node[box,minimum width=1.95cm,minimum height=0.54cm] (hb2) at (10.42,1.82) {\texttt{<reg>\_r2}};
+
+    \draw (hb0.east) -- (11.78,3.68);
+    \draw (hb1.east) -- (11.78,2.75);
+    \draw (hb2.east) -- (11.78,1.82);
+    \draw (11.78,1.50) -- (11.78,3.68);
+    \fill (11.78,2.75) circle (1.1pt);
+    \fill (11.78,3.15) circle (1.1pt);
+
+    \node[box,minimum width=1.82cm,minimum height=1.08cm] (vb) at (13.15,3.15) {\textbf{\texttt{tmr\_voter}}\\2-de-3\\(sin \textit{bypass})};
+    \node[box,minimum width=1.82cm,minimum height=0.70cm] (xb) at (13.15,1.50) {\textbf{Red XOR}\\CSR \texttt{0xCC0/1}};
+
+    \draw[wire] (11.78,3.15) -- (vb.west);
+    \draw[wire] (11.78,1.50) -- (xb.west);
+    \draw[wire] (vb.east) -- (15.92,3.15);
+    \node[font=\fontsize{6.0}{7.0}\selectfont] at (15.36,3.38) {\texttt{voted}};
+
+    % Lazo self-healing
+    \fill[accentblue] (14.62,3.15) circle (1.3pt);
+    \draw[line width=0.95pt,draw=accentblue] (14.62,3.15) -- (14.62,4.34) -- (8.80,4.34) -- (8.80,1.82);
+    \draw[fb] (8.80,3.68) -- (hb0.west);
+    \draw[fb] (8.80,2.75) -- (hb1.west);
+    \draw[fb] (8.80,1.82) -- (hb2.west);
+    \node[font=\fontsize{6.0}{7.0}\selectfont\bfseries,text=accentblue] at (11.75,4.54) {\texttt{next\_<reg> = voted} (precarga síncrona)};
+    \node[font=\fontsize{6.0}{7.0}\selectfont\itshape,text=accentblue] at (12.20,0.45) {Captura simultánea \texttt{\_r0..\_r2 <= next\_<reg>}: repara en 1 ciclo.};
+  \end{tikzpicture}
+  \caption{Comparación estructural del lazo de realimentación TMR entre HARV y HPicoRV32.}
+  \label{fig:tmr_sh}
+\end{figure}
+
+En el dominio ECC ocurre el mismo contraste. HARV decodifica y corrige únicamente de forma combinacional en la salida de \texttt{hamming\_register} y \texttt{regfile}, sin reescribir la celda dañada; en registros de vida larga un segundo SEU convierte el fallo en doble error incorregible (DBE). HPicoRV32 ejecuta \textit{auto-scrubbing} automático en todos sus bancos:
+\begin{enumerate}
+  \item \textbf{\texttt{cpuregs} (banco de registros):} cuando la CPU no realiza escritura (\texttt{!cpuregs\_cpu\_wen}) y algún puerto de lectura presenta \texttt{sbiterr}, reescribe la palabra completa de 39~bits reparada en el mismo flanco de reloj (\texttt{cpuregs\_scrub1} con prioridad sobre \texttt{cpuregs\_scrub2}), con cero ciclos de penalización.
+  \item \textbf{BRAM (\texttt{bram\_ecc.v}):} ante un error simple (\texttt{SBE}) en lectura (\texttt{ST\_READ}), transita a \texttt{ST\_SCRUB} (3 ciclos totales frente a 2 en lectura limpia) y reescribe \texttt{scrub\_word\_q} en la memoria física, incluso en \texttt{IMEM} pese a tener \texttt{READ\_ONLY=1} en el bus.
+\end{enumerate}
+
+\section{Protección de registros y memorias ECC}
+
+Ambos procesadores adoptan códigos SEC-DED (39,32) sistemáticos (32~bits de dato + 7~bits de redundancia), pero la construcción de la matriz de paridad y la arquitectura de almacenamiento determinan su coste y fiabilidad en FPGA (Tabla~\ref{tab:ecc}).
+
+\begin{table}[htbp]
+  \centering
+  \footnotesize
+  \caption{Comparativa del subsistema ECC SEC-DED (39,32).}
+  \label{tab:ecc}
+  \begin{tabularx}{\textwidth}{@{}lYY@{}}
+    \toprule
+    \textbf{Característica} & \textbf{HARV} & \textbf{HPicoRV32} \\
+    \midrule
+    Código SEC-DED & Hamming clásico + paridad global \texttt{[38]} & Matriz Hsiao (39,32)~\cite{hsiao1970} balanceada \\
+    Ecuaciones XOR & Desbalanceadas (6--18 bits) + \texttt{xor\_reduce(39b)} & 13--14 entradas por fila, columnas peso 3 \\
+    \textit{Auto-scrubbing} & Ausente (solo corrección combinacional) & En \texttt{cpuregs} (1c), IMEM y DMEM (\texttt{ST\_SCRUB}) \\
+    Banco de registros & 1\,209~FFs + 306 \texttt{MUXF7} (\texttt{31$\times$39}) & 14 \texttt{RAM32M} en LUTRAM (\texttt{32$\times$39}) \\
+    Registros PC / IR & \texttt{hamming\_register} (IR con flags \texttt{open}) & PC con TMR; IR protegido vía IMEM ECC \\
+    Memorias IMEM / DMEM & Externas al núcleo (sin ECC ni RMW en RTL) & 8~KB + 8~KB en \texttt{bram\_ecc.v} con RMW 3c (\texttt{sb/sh}) \\
+    Falsos positivos & Lee \texttt{rs1/rs2} aunque no se usen; bit \texttt{[38]} ciego & Cualifica \texttt{reg\_uses\_rs1/2}; paridad simétrica \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+El análisis directo del RTL de HARV (\texttt{external/harv/hdl/ft\_components/}) revela cuatro puntos débiles relevantes frente al diseño de HPicoRV32:
+\begin{enumerate}
+  \item \textbf{Matriz desbalanceada y bit global \texttt{[38]}:} las filas de \texttt{PARITY\_POS} en \texttt{hamming\_pkg.vhd} agrupan entre 6 y 18~datos y requieren un árbol \texttt{xor\_reduce} de 38/39 bits para la paridad total. Además, un bit-\textit{flip} en \texttt{[38]} deja el síndrome \texttt{parity\_diff\_w} a cero, manteniendo \texttt{single\_err\_o=0} sin notificar hasta que un segundo SEU provoca un fallo doble directo. En HPicoRV32 (\texttt{rtl/core/ecc\_secded.v}), la matriz Hsiao (39,32)~\cite{hsiao1970} reparte uniformemente 13--14 entradas por ecuación, trata por igual los 39~bits (corrigiendo también \texttt{ecc\_o[6:0]} para \textit{scrubbing}) y garantiza que \texttt{32'h0} codifique a \texttt{39'h0} tras el arranque en FPGA.
+  \item \textbf{\textit{Bug} de reset no nulo (\texttt{hamming\_pkg.vhd:123--125}):} la función auxiliar \texttt{get\_parity\_data\_result} devuelve \texttt{xor\_reduce(par\_data)} concatenado con \texttt{par\_data} sin incluir \texttt{data} en el bit~38. Con dirección de arranque nula queda oculto, pero cualquier \texttt{RESET\_VALUE} con peso impar inicializa invertida la paridad global y convierte el primer SEU en un falso error doble sin corrección.
+  \item \textbf{Inferencia de \texttt{regfile} en Artix-7:} en HARV, el banco \texttt{g\_HAMMING} fuerza la síntesis en 1\,209 biestables individuales con árboles \texttt{MUXF7} para lectura combinacional (y en \texttt{g\_NORMAL} la comparación metalógica \texttt{rd\_i /= "UUUUU"} provoca que Vivado pode el banco completo al sintetizar el core aislado). HPicoRV32 conserva un único puerto de escritura síncrono y dos lecturas asíncronas en \texttt{cpuregs}, manteniendo la inferencia de memoria distribuida (\texttt{14~RAM32M}, solo $+2$ frente a los 12 del diseño sin ECC).
+  \item \textbf{Lecturas especulativas y cobertura de memoria:} HARV decodifica siempre \texttt{rs1} y \texttt{rs2} aunque la instrucción (p.~ej., \texttt{LUI} o \texttt{ADDI}) ignore esos campos, generando falsas alarmas; HPicoRV32 filtra \texttt{reg\_dbe\_event} con \texttt{reg\_uses\_rs1/2} (excluyendo también lecturas CSR y \texttt{mret}). Asimismo, HARV delega el ECC de \texttt{dmem} al SoC externo, deja sin protección ni telemetría a \texttt{imem} y desconecta (\texttt{open}) las señales de error del registro de instrucción (\texttt{register\_instr\_u}). HPicoRV32 integra \texttt{bram\_ecc.v} para IMEM y DMEM: registra \texttt{rdata\_o} para cortar el camino crítico desde BRAM, ejecuta \textit{Read-Modify-Write} de 3 ciclos para \texttt{sb/sh} (saneando SBE previo y abortando la escritura si hay DBE), soporta backend dual (RTL Hsiao portable o IP \texttt{blk\_mem\_gen} \textit{Soft ECC} en Vivado mediante \texttt{VIVADO\_ECC\_IP=1}) y aplica barrera \texttt{W\^{}X}.
+\end{enumerate}
+
+\section{Gestión de \textit{traps} y telemetría}
+
+HARV dispone de un único mecanismo de \textit{trap} en \texttt{control.vhd} (\texttt{STAT\_TRAP} $\rightarrow$ \texttt{TRAP\_HANDLER\_ADDR}), capturando \texttt{uscratch}, \texttt{uepc}, \texttt{ucause}, \texttt{utval} y \texttt{uip} en \texttt{csr.vhd}. Su revisión muestra limitaciones importantes: en \texttt{control.vhd:172} la condición \texttt{or dmem\_sbu\_i = '1' or dmem\_dbu\_i = '1'} está comentada, de modo que los códigos \texttt{ucause} \texttt{0x10} y \texttt{0x20} nunca disparan \textit{trap}; \texttt{ecall\_o} está fijado a \texttt{'0'}; no detecta instrucciones ilegales; \texttt{imem\_err\_i} bloquea la máquina en \texttt{STAT\_IDLE}; no implementa instrucción de retorno (\texttt{mret/uret}) ni guarda frente a reentrancia. Los 10 contadores de error (\texttt{0x7C0}--\texttt{0x7C9}) y los registros de excepción son de lectura/escritura y carecen de protección.
+
+HPicoRV32 separa explícitamente un mecanismo de \textbf{Soft-Trap} (recuperable o diagnosticable por software) de un \textbf{Hard-Trap} (parada segura inmediata en \texttt{cpu\_state\_trap} con \texttt{LED15}), evitando activar \texttt{ENABLE\_IRQ/QREGS} en PicoRV32 porque ampliar \texttt{cpuregs} de 32 a 36 palabras duplicaría el uso de LUTRAM de 14 a 28~\texttt{RAM32M} (Tabla~\ref{tab:traps}).
+
+\begin{table}[htbp]
+  \centering
+  \footnotesize
+  \caption{Mecanismos de excepción y telemetría de fallos.}
+  \label{tab:traps}
+  \begin{tabularx}{\textwidth}{@{}lYY@{}}
+    \toprule
+    \textbf{Dimensión} & \textbf{HARV} & \textbf{HPicoRV32} \\
+    \midrule
+    Niveles de excepción & Único (\texttt{STAT\_TRAP} $\rightarrow$ \texttt{TRAP\_HANDLER\_ADDR}) & Dual: Soft-Trap (\texttt{0x0000\_0010}) + Hard-Trap \\
+    Causas capturadas & Solo fallo de bus en \texttt{dmem} (\texttt{dmem\_sbu/dbu} comentados; \texttt{ecall=0}) & \texttt{ILLINSN} (1), \texttt{BREAK} (2), \texttt{MISALIGN} (3), \texttt{HARV\_WX} (4), \texttt{DMEM\_DBE} (5) \\
+    DBE en \texttt{regfile} o \texttt{imem} & Solo incrementa contador (no detiene ni salta) & Hard-Trap inmediato (\texttt{cpu\_trap=1}), bloquea DMEM/LEDs \\
+    Retorno y reentrancia & Sin \texttt{mret}/\texttt{uret} ni bloqueo de reentrancia & \texttt{mret} (\texttt{0x3020\_0073}); segunda excepción escala a Hard-Trap \\
+    Telemetría de errores & 10 CSRs R/W (\texttt{0x7C0}--\texttt{0x7C9}, incl.\ ALU y \texttt{dmem}) & 4 CSRs R/O (\texttt{0xCC0}--\texttt{0xCC3}) + 4 MMIO R/O (\texttt{0x3000\_0000..0C}) \\
+    Diagnóstico \textit{trap} & \texttt{uepc}/\texttt{ucause}/\texttt{utval} en \texttt{csr.vhd} (sin proteger) & \texttt{CSR\_TRAP\_EPC} (\texttt{0xCC4}) y \texttt{CSR\_TRAP\_CAUSE} (\texttt{0xCC5}) R/O \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Cuando ocurre una de las cinco causas capturables con \texttt{trap\_active=0} y sin fallos fatales en \texttt{cpuregs} ni \texttt{IMEM}, HPicoRV32 graba \texttt{trap\_epc} (\texttt{0xCC4}) y \texttt{trap\_cause} (\texttt{0xCC5}), activa \texttt{trap\_active}, cancela transacciones en curso y salta a \texttt{0x0000\_0010} usando el camino del PC protegido por TMR. El vector \texttt{\_trap\_vector} en \texttt{crt0.S} preserva los 16 registros \textit{caller-saved} en \texttt{DMEM} (habilitada mientras \texttt{cpu\_trap=0}), invoca a \texttt{trap\_handler()} en C para reportar causa, dirección y los ocho contadores por LEDs y UART, y retorna con \texttt{mret} ante \texttt{BREAK} o detiene el sistema. Si se produce un DBE en \texttt{cpuregs} o \texttt{IMEM} —donde no es seguro ejecutar código ni confiar en la pila— o una segunda excepción anidada (\texttt{trap\_active=1}), la CPU entra en Hard-Trap sin sobrescribir los registros de diagnóstico.
+
+\section{Consumo de recursos, temporización y verificación}
+
+La Tabla~\ref{tab:res} reúne las métricas \textit{post-route} sobre Artix-7 \texttt{xc7a100tcsg324-1} con reloj objetivo de 100~MHz. Para interpretarlas con rigor deben tenerse en cuenta dos matices metodológicos: (1) las corridas de HARV en Vivado~2025.2 corresponden a síntesis \textit{Out-Of-Context} (OOC) del núcleo aislado (sin SoC ni memorias y con \texttt{regfile} podado en \texttt{harv\_base}, \texttt{harv\_tmr\_ctrl} y \texttt{harv\_tmr\_all}), mientras que las de HPicoRV32 incluyen el SoC completo; (2) las cifras de Vivado para HPicoRV32 corresponden al Hito~2 (pre-\textit{Soft-Trap}), mientras que la versión final consolidada con \textit{Soft-Trap} se midió en el flujo abierto \texttt{openXC7} (\texttt{Yosys 0.69} + \texttt{nextpnr-xilinx}).
+
+\begin{table}[htbp]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \caption{Recursos y temporización \textit{post-route} en Artix-7 (\texttt{xc7a100tcsg324-1} @ 100~MHz).}
+  \label{tab:res}
+  \begin{tabularx}{\textwidth}{@{}Ylrrrrrr@{}}
+    \toprule
+    \textbf{Diseño / Flujo} & \textbf{Ámbito} & \textbf{LUTs} & \textbf{FFs} & \textbf{LUTRAM} & \textbf{BRAM} & \textbf{WNS (ns)} & \textbf{$F_{\max}$ (MHz)} \\
+    \midrule
+    \texttt{harv\_base} (Vivado)$^\dagger$ & Core OOC & 845 & 136 & 0 & 0 & $-3.141$ & $\sim 76.1$ \\
+    \texttt{harv\_tmr\_ctrl} (Vivado)$^\dagger$ & Core OOC & 928 & 147 & 0 & 0 & $-4.322$ & $\sim 69.8$ \\
+    \texttt{harv\_tmr\_all} (Vivado)$^\dagger$ & Core OOC & 1\,995 & 195 & 0 & 0 & $-5.515$ & $\sim 64.5$ \\
+    \texttt{harv\_ecc} (Vivado) & Core OOC & 2\,674 & 1\,808 & 0 & 0 & $-14.964$ & $\sim 40.1$ \\
+    \texttt{harv\_ft\_full} (Vivado) & Core OOC & 3\,958 & 1\,814 & 0 & 0 & $-17.504$ & $\sim 36.4$ \\
+    \midrule
+    HPicoRV32 Base (Vivado H0) & SoC & 1\,114 & 703 & 44 & 4 & $+3.531$ & $\sim 154.6$ \\
+    HPicoRV32 TMR (Vivado H1) & SoC & 1\,429 & 936 & 44 & 4 & $+2.298$ & $\sim 129.8$ \\
+    HPicoRV32 TMR+ECC RTL (Vivado H2) & SoC & 2\,135 & 1\,375 & 56 & 5 & $+0.226$ & $\sim 102.3$ \\
+    HPicoRV32 TMR+ECC IP (Vivado H2) & SoC & 2\,111 & 1\,368 & 56 & 5 & $+0.240$ & $\sim 102.5$ \\
+    \midrule
+    HPicoRV32 Soft-Trap (\texttt{openXC7}, \texttt{FI=0}) & SoC & 2\,684$^\ddagger$ & 1\,401 & 14~\texttt{RAM32M} & 5 eq. & $+0.778$ & $108.44$ \\
+    \bottomrule
+  \end{tabularx}
+  \vspace{3pt}
+  \begin{minipage}{\textwidth}
+    \raggedright\scriptsize
+    $^\dagger$En estas tres variantes OOC, Vivado podó \texttt{regfile\_u} (\texttt{g\_NORMAL} incluye \texttt{rd\_i /= "UUUUU"}).
+    $^\ddagger$LUTs lógicas de Yosys (\texttt{4\,055 SLICE\_LUTX} en \texttt{nextpnr}). Con \texttt{FI=1} (\texttt{soc\_fi\_top}) consume 1\,527~FFs y cierra a 103.49~MHz (\textit{slack} $+337$~ps).
+  \end{minipage}
+\end{table}
+
+Pese a incluir memorias ECC, UART y decodificación \texttt{W\^{}X}, el SoC HPicoRV32 completo en Vivado (\texttt{2\,135} LUTs y \texttt{1\,375} FFs) requiere un \textbf{46\,\% menos de LUTs} y un \textbf{24\,\% menos de FFs} que el núcleo aislado \texttt{harv\_ft\_full} (\texttt{3\,958} LUTs y \texttt{1\,814} FFs), operando casi \textbf{2.8 veces más rápido} ($102.3$--$108.4$~MHz frente a $36.4$~MHz). Tres decisiones explican esta diferencia: (1) la ejecución multiciclo evita encadenar en un único periodo la decodificación del IR, lectura del banco, ALU y recodificación (\texttt{27.380~ns}, con 82.3\,\% de retardo de enrutado en \texttt{harv\_ft\_full}); (2) el uso de LUTRAM en \texttt{cpuregs} elimina 1\,209~FFs y más de 300~\texttt{MUXF7}; (3) omitir \texttt{alu\_tmr} ahorra $\sim$1\,559~LUTs y nueve niveles lógicos extra, mientras el registro \texttt{rdata\_o} de \texttt{bram\_ecc} aísla la ruta crítica de las BRAM (que solo crecen de 4 a 5 tiles equivalentes). El soporte completo de \textit{Soft-Trap} en \texttt{openXC7} añade únicamente $+67$~LUTs Yosys y $+41$~FFs sin afectar a LUTRAM ni BRAM.
+
+Para contrastar la eficacia frente a fallos se ejecutó el mismo \textit{benchmark} de suma de vectores de 300 elementos usado en la evaluación SoC de HARV~\cite{santos2021microrel} ($N=1\,000$ experimentos por escenario). De nuevo es necesario distinguir el alcance de la inyección: el artículo de HARV inyectó SEUs mediante ModelSim sobre todos los biestables del procesador y periféricos en Zynq (1\,453~FFs en el SoC endurecido, excluyendo IMEM/DMEM), obteniendo una subida de \textit{Match} del \textbf{90.9\,\% al 99.3\,\%} en 1-SEU y del \textbf{51.8\,\% al 93.9\,\%} en 10-SEU, con fallos residuales en el bus y la UART sin proteger. En HPicoRV32 (\texttt{tb\_fault\_campaign.v} en Verilator), la campaña de Fase~1 inyecta mediante el bus hardware desacoplado sobre los 8 objetivos endurecidos (perfiles CPU \texttt{0..5} y SoC \texttt{0..7} incluyendo IMEM/DMEM): la línea base sin TMR ni ECC en registros (\texttt{0,0}) obtiene \textbf{29.7\,\%} de \textit{Match} en 1-SEU y \textbf{0.0\,\%} en 10-SEU (99.5\,\% \textit{Hang}), mientras que la configuración completa (\texttt{1,1}) alcanza \textbf{100.0\,\% de \textit{Match}} (\texttt{0} SDC, \texttt{0} \textit{Hang}) tanto en 1-SEU como en 10-SEU sobre los perfiles CPU y SoC, además de 4/4 \textit{traps} controlados ante DBE dirigidos en \texttt{cpuregs}, IMEM, DMEM y violación \texttt{W\^{}X}. Queda pendiente para una Fase~2 extender la inyección externa de Verilator al resto de biestables no protegidos del SoC (bus MMIO y UART) para obtener la cifra global equivalente a~\cite{santos2021microrel}.
+
+\section{Síntesis de compromisos y frentes abiertos}
+
+HPicoRV32 corrige las principales carencias estructurales observadas en el código de referencia de HARV —ausencia de \textit{self-healing} en \texttt{control\_tmr}, falta de \textit{scrubbing} ECC, banco de registros en FFs, ruta combinacional uniciclo de 36~MHz, \textit{bug} de paridad global en reset, memoria sin ECC/\texttt{W\^{}X} y SPOF en \texttt{0xBC0}— logrando cerrar temporización por encima de 100~MHz con menos área en FPGA. A cambio, asume tres compromisos explícitos que conviene vigilar antes de un despliegue final en misión:
+\begin{itemize}
+  \item \textbf{Exposición de la ALU a SET:} al no triplicar la lógica combinacional de cálculo para mantener área y frecuencia, la protección frente a transitorios en LUTs es menor que en \texttt{harv\_tmr\_all}.
+  \item \textbf{Registros de telemetría y periféricos sin endurecer:} igual que \texttt{csr.vhd} en HARV, los contadores CSR/MMIO, el periférico UART y los registros auxiliares del camino de datos (\texttt{reg\_op1}, \texttt{reg\_op2}, \texttt{reg\_out}) permanecen en FFs simples.
+  \item \textbf{Cobertura total del SoC en inyección:} la Fase~1 valida los objetivos endurecidos a 100~MHz en simulación y placa, pero requiere la Fase~2 sobre el 100\,\% de los biestables del SoC para cuantificar la sección eficaz residual de los bloques sin proteger.
+\end{itemize}
+
+\bibliographystyle{unsrt}
+\small
+\bibliography{references}
+
+\end{document}
