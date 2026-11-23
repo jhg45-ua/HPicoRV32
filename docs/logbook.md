@@ -421,6 +421,37 @@ Definir la arquitectura, interfaz y metodología de verificación de un mecanism
     - `FI=0` (`soc`): `106.97 MHz` (`PASS @ 100 MHz`, holgura `+652 ps`), bitstream generado.
     - `FI=1` (`soc_fi_top`): `103.49 MHz` (`PASS @ 100 MHz`, holgura `+337 ps`), `1527` FFs (`1500 FDRE + 27 FDSE`), `14 RAM32M`, `10 RAMB18E1`, `198 CARRY4`, `0` latches y réplicas TMR preservadas (`96/96`, `96/96`, `24/24`, `6/6`, `15/15` redes distintas), bitstream generado.
 
+- **Combinaciones físicas de interruptores y botones en Nexys A7-100T (`FI=1`):**
+  - **Controles y pines ([Nexys-A7-100T-FI.xdc](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/Nexys-A7-100T-FI.xdc)):**
+    - `SW[2:0]` (`M13`, `L16`, `J15`): selector binario del objetivo (`0..7`).
+    - `SW[3]` (`R15`): severidad (`0` = fallo recuperable `SBE` / `1` réplica TMR; `1` = fallo fatal `DBE` / `2` réplicas TMR / salto `W^X`).
+    - `SW[4]` (`R17`): modo (`0` = disparo manual con `BTNC`; `1` = campaña autónoma continua LFSR a `10 fallos/s` entre todos los objetivos `0..7`).
+    - `BTNC` (`N17`): pulsador central de disparo único en modo manual (`SW[4]=0`, con filtro antirrebote de `10 ms`).
+    - `CPU_RESETN` (`C12`, botón rojo): reinicia el SoC, apaga el enclave `LED15` (`V11`, señal `trap`) y reanuda la ejecución tras un fallo fatal.
+  - **Modo autónomo continuo (`SW[4] = 1`, `BTNC` ignorado):**
+    - `1_0_xxx` (`SW[4]=1, SW[3]=0`): lluvia continua de fallos simples recuperables (`10 fallos/s`) sobre `0..7`; los LEDs `0..14` siguen contando con normalidad, `LED15` permanece apagado y la UART refleja el incremento de `PC`, `CTRL`, `SBU`, `ISBU` y `DSBU`.
+    - `1_1_xxx` (`SW[4]=1, SW[3]=1`): lluvia continua de fallos fatales (`DBE` / `MBU`) hasta que el primer impacto crítico detiene la CPU y enciende `LED15`.
+  - **Tabla de combinaciones en modo manual (`SW[4] = 0` + pulsar `BTNC`):**
+
+| `SW[4:0]` | `SW[3]` (Modo) | `SW[2:0]` (Objetivo) | Máscara inyectada (`rep` / `bits`) | Efecto esperado en placa (firmware `counter`) |
+| :---: | :---: | :--- | :--- | :--- |
+| `0_0_000` | `0` (SBE) | `0` (`reg_pc`) | `rep=3'b001`, `32'h0000_0001` | TMR corrige en 1 ciclo; `LED15=0`, `PC` (CSR `0xCC0`) `+1` en UART. |
+| `0_0_001` | `0` (SBE) | `1` (`reg_next_pc`) | `rep=3'b001`, `32'h0000_0001` | TMR corrige en 1 ciclo; `LED15=0`, `PC` `+1` en UART. |
+| `0_0_010` | `0` (SBE) | `2` (`cpu_state`) | `rep=3'b001`, `8'h01` | TMR corrige en 1 ciclo; `LED15=0`, `CTRL` (CSR `0xCC1`) `+1` en UART. |
+| `0_0_011` | `0` (SBE) | `3` (`mem_state`) | `rep=3'b001`, `2'b01` | TMR corrige en 1 ciclo; `LED15=0`, `CTRL` `+1` en UART. |
+| `0_0_100` | `0` (SBE) | `4` (`latched_rd`) | `rep=3'b001`, `5'h01` | TMR corrige en 1 ciclo; `LED15=0`, `CTRL` `+1` en UART. |
+| `0_0_101` | `0` (SBE) | `5` (`cpuregs`) | `1` bit (`39'h1`) en escritura | ECC corrige al leer el registro; `LED15=0`, `SBU` (CSR `0xCC2`) `+1` en UART. |
+| `0_0_110` | `0` (SBE) | `6` (`IMEM`) | `1` bit (`39'h1`) en lectura | ECC corrige al vuelo (+ *scrub* RTL); `LED15=0`, `ISBU` `+1` en UART. |
+| `0_0_111` | `0` (SBE) | `7` (`DMEM`) | `1` bit (`39'h1`) *(en escritura si `VIVADO_ECC_IP_FI`)* | ECC corrige al leer `dmem_cnt`/`dmem_byte`; `LED15=0`, `DSBU` `+1` en UART. |
+| `0_1_000` | `1` (Fatal) | `0` (`reg_pc`) | `rep=3'b011`, `32'h0000_0001` (bit 0) | MBU vence al votador e introduce desalineación (`PC[0]=1`); activa trampa (`LED15=1`; con *Soft-Trap*, `LEDs=0x7003` + informe UART). |
+| `0_1_001` | `1` (Fatal) | `1` (`reg_next_pc`, **`W^X`**) | `rep=3'b111`, `32'h0000_2000` | Salto forzado a zona `DMEM` (`0x0000_2000`): viola Harvard `W^X` (`harv_fault_r=1`, `LED15=1`; con *Soft-Trap*, `LEDs=0x7004` + `[HPicoRV32 TRAP]`). |
+| `0_1_010` | `1` (Fatal) | `2` (`cpu_state`) | `rep=3'b011`, `8'h01` | MBU vence al votador de la FSM principal (cuelgue o trampa `ILLINSN`, `LED15=1` si atrapa). |
+| `0_1_011` | `1` (Fatal) | `3` (`mem_state`) | `rep=3'b011`, `2'b01` | MBU vence al votador de la FSM de bus (corrupción o bloqueo de transacción). |
+| `0_1_100` | `1` (Fatal) | `4` (`latched_rd`) | `rep=3'b011`, `5'h01` | MBU desvía el registro destino de escritura (corrupción de flujo o estado). |
+| `0_1_101` | `1` (Fatal) | `5` (`cpuregs`) | `2` bits (`39'h3`) en escritura | DBE en banco de registros: **Hard-Trap** inmediato al leer (`reg_dbu`, `LED15=1`). |
+| `0_1_110` | `1` (Fatal) | `6` (`IMEM`) | `2` bits (`39'h3`) en lectura | DBE en memoria de instrucciones: **Hard-Trap** inmediato (`ecc_fault_r=1`, `LED15=1`). |
+| `0_1_111` | `1` (Fatal) | `7` (`DMEM`) | `2` bits (`39'h3`) *(en escritura si `VIVADO_ECC_IP_FI`)* | DBE en memoria de datos: `ecc_fault_r=1`, `LED15=1` (y con *Soft-Trap*, `LEDs=0x7005` + informe UART con `DDBU=1` antes de detenerse). |
+
 - **Benchmark y campaña HARV automatizada (Hito 5):**
   - [fi_bench/main.c](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/sw/apps/fi_bench/main.c): *Sum of vectors* bare-metal de `300` elementos `uint32_t` (`vec_a`, `vec_b`, `vec_c` en DMEM + `.rodata` en IMEM + mezcla RMW `sb`/`sh`), rutina de entrada `__attribute__((naked))` que limpia `x1, x5..x31` para aislar corridas sucesivas sin fuga de SEUs latentes (`1288 B` `.text`, `16 B` `.data`, `3600 B` `.bss`). Emite `RESULT=0x01d3a7bf` y `TELEM ...` por UART antes de señalizar fin en `REG_LEDS=0x7FFF` (`118,720` ciclos totales, `78,758` de cómputo con `SIM_FAST=1`).
   - [picorv32.v](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/rtl/core/picorv32.v): los CSRs de telemetría `0xCC0..0xCC3` devuelven `32'd0` cuando `ENABLE_TMR=0` o `ENABLE_ECC=0` (`0%` impacto con ambos habilitados), habilitando la matriz de ablación `ENABLE_TMR × ENABLE_REG_ECC` con el mismo firmware.
