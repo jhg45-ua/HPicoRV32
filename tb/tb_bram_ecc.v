@@ -23,10 +23,6 @@ module tb_bram_ecc;
   wire           rw_ready;
   wire           rw_sbe;
   wire           rw_dbe;
-  reg            rw_fi_valid = 1'b0;
-  reg     [38:0] rw_fi_mask = 39'h0;
-  wire           rw_fi_ack;
-  integer        rw_ack_cnt = 0;
 
   // Bus para instancia solo lectura (tipo IMEM)
   reg            ro_valid;
@@ -37,8 +33,6 @@ module tb_bram_ecc;
   wire           ro_ready;
   wire           ro_sbe;
   wire           ro_dbe;
-  reg            ro_fi_valid = 1'b0;
-  wire           ro_fi_ack;
 
   integer        errors;
 
@@ -46,56 +40,37 @@ module tb_bram_ecc;
       .WORDS    (64),
       .ADDR_BITS(6),
       .READ_ONLY(1'b0),
-      .USE_INIT (1'b0),
-      .ENABLE_FI(1'b1)
+      .USE_INIT (1'b0)
   ) dut_rw (
-      .clk       (clk),
-      .resetn    (resetn),
-      .valid_i   (rw_valid),
-      .wstrb_i   (rw_wstrb),
-      .addr_i    (rw_addr),
-      .wdata_i   (rw_wdata),
-      .rdata_o   (rw_rdata),
-      .ready_o   (rw_ready),
-      .sbe_o     (rw_sbe),
-      .dbe_o     (rw_dbe),
-      .fi_valid_i(rw_fi_valid),
-      .fi_mask_i (rw_fi_mask),
-      .fi_ack_o  (rw_fi_ack)
+      .clk    (clk),
+      .resetn (resetn),
+      .valid_i(rw_valid),
+      .wstrb_i(rw_wstrb),
+      .addr_i (rw_addr),
+      .wdata_i(rw_wdata),
+      .rdata_o(rw_rdata),
+      .ready_o(rw_ready),
+      .sbe_o  (rw_sbe),
+      .dbe_o  (rw_dbe)
   );
 
   bram_ecc #(
       .WORDS    (16),
       .ADDR_BITS(4),
       .READ_ONLY(1'b1),
-      .USE_INIT (1'b0),
-      .ENABLE_FI(1'b0)
+      .USE_INIT (1'b0)
   ) dut_ro (
-      .clk       (clk),
-      .resetn    (resetn),
-      .valid_i   (ro_valid),
-      .wstrb_i   (ro_wstrb),
-      .addr_i    (ro_addr),
-      .wdata_i   (ro_wdata),
-      .rdata_o   (ro_rdata),
-      .ready_o   (ro_ready),
-      .sbe_o     (ro_sbe),
-      .dbe_o     (ro_dbe),
-      .fi_valid_i(ro_fi_valid),
-      .fi_mask_i (39'h0000_0003),
-      .fi_ack_o  (ro_fi_ack)
+      .clk    (clk),
+      .resetn (resetn),
+      .valid_i(ro_valid),
+      .wstrb_i(ro_wstrb),
+      .addr_i (ro_addr),
+      .wdata_i(ro_wdata),
+      .rdata_o(ro_rdata),
+      .ready_o(ro_ready),
+      .sbe_o  (ro_sbe),
+      .dbe_o  (ro_dbe)
   );
-
-  // Emula el desarme síncrono de fault_injector al recibir fi_ack_o
-  always @(posedge clk) begin
-    if (!resetn) begin
-      rw_fi_valid <= 1'b0;
-      rw_ack_cnt  <= 0;
-    end else if (rw_fi_valid && rw_fi_ack) begin
-      rw_fi_valid <= 1'b0;
-      rw_ack_cnt  <= rw_ack_cnt + 1;
-    end
-  end
 
   // Ejecuta una transacción completa sobre dut_rw midiendo ciclos y pulsos ECC
   task do_rw;
@@ -300,43 +275,7 @@ module tb_bram_ecc;
       errors = errors + 1;
     end else $display("[PASS] T6: READ_ONLY protege bus y realiza scrubbing");
 
-    // 7. Inyeccion mediante puerto FI (ENABLE_FI=1 en dut_rw, ENABLE_FI=0 en dut_ro)
-    //    Comprueba que el saboteador XOR externo dispara scrubbing en SBE, alerta en DBE
-    //    y queda totalmente anulado si ENABLE_FI=0 (modo vuelo).
-    do_rw(4'b1111, 6'd3, 32'hA5A5_5A5A, rd, sbe_c, dbe_c, cyc);
-    @(negedge clk);
-    // 7a: SBE en bit 12 -> la lectura debe devolver el dato intacto (0xA5A5_5A5A) en 3 ciclos (con scrub)
-    rw_fi_mask  = (39'd1 << 12);
-    rw_fi_valid = 1'b1;
-    do_rw(4'b0000, 6'd3, 32'h0, rd, sbe_c, dbe_c, cyc);
-    if (rd !== 32'hA5A5_5A5A || sbe_c !== 1 || dbe_c !== 0 || cyc !== 3 ||
-        rw_fi_valid !== 1'b0 || rw_ack_cnt !== 1) begin
-      $display("[FAIL T7a] SBE por puerto FI rdata=%h sbe=%0d ack=%0d", rd, sbe_c, rw_ack_cnt);
-      errors = errors + 1;
-    end
-
-    @(negedge clk);
-    // 7b: DBE en bits 0 y 1 -> debe activar dbe_o=1 sin colgar la transacción (2 ciclos)
-    rw_fi_mask  = 39'h0000_0003;
-    rw_fi_valid = 1'b1;
-    do_rw(4'b0000, 6'd3, 32'h0, rd, sbe_c, dbe_c, cyc);
-    if (sbe_c !== 0 || dbe_c !== 1 || cyc !== 2 || rw_fi_valid !== 1'b0 || rw_ack_cnt !== 2) begin
-      $display("[FAIL T7b] DBE por puerto FI dbe=%0d ack=%0d", dbe_c, rw_ack_cnt);
-      errors = errors + 1;
-    end
-
-    @(negedge clk);
-    // 7c: En dut_ro (ENABLE_FI=0) fi_valid=1 debe ignorarse por completo (ni falla ni da ack)
-    ro_fi_valid = 1'b1;
-    do_ro(4'b0000, 4'd0, 32'h0, rd, sbe_c, dbe_c);
-    if (rd !== 32'h0000_0413 || sbe_c !== 0 || dbe_c !== 0 || ro_fi_ack !== 1'b0) begin
-      $display("[FAIL T7c] ENABLE_FI=0 no debe inyectar ni activar ack");
-      errors = errors + 1;
-    end else $display("[PASS] T7: Puerto FI (SBE+scrub, DBE y aislamiento ENABLE_FI=0)");
-    @(negedge clk);
-    ro_fi_valid = 1'b0;
-
-    if (errors == 0) $display("\n[OK] bram_ecc verificado: 7/7 pruebas superadas.");
+    if (errors == 0) $display("\n[OK] bram_ecc verificado: 6/6 pruebas superadas.");
     else $display("\n[ERROR] %0d errores en bram_ecc.", errors);
 
     $finish;

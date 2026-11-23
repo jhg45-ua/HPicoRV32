@@ -19,20 +19,13 @@ module tb_soc;
   wire        ser_tx;
   reg         ser_rx = 1'b1;  // Nivel en reposo de UART es alto
 
-  soc_core #(
-      .ENABLE_FI(1'b0)
-  ) uut (
-      .clk          (clk),
-      .resetn       (resetn),
-      .trap         (trap),
-      .leds         (leds),
-      .ser_tx       (ser_tx),
-      .ser_rx       (ser_rx),
-      .fi_valid_i   (1'b0),
-      .fi_target_i  (4'd0),
-      .fi_rep_mask_i(3'd0),
-      .fi_bit_mask_i(39'd0),
-      .fi_ack_o     ()
+  soc uut (
+      .clk   (clk),
+      .resetn(resetn),
+      .trap  (trap),
+      .leds  (leds),
+      .ser_tx(ser_tx),
+      .ser_rx(ser_rx)
   );
 
   initial begin

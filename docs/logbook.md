@@ -338,7 +338,10 @@ Firmware de FPGA compilado con `SIM_FAST=0` (`.text = 908` B, `.data = 4` B, `.b
 
 ---
 
-## [2026-11-22] — Fase 1 (Tarea 1): Especificación del sistema de inyección de fallos desacoplado (`docs/fi-spec`)
+## [2026-11-22] — Fase 1 (Tarea 1): Especificación del sistema de inyección de fallos desacoplado (`docs/fi-spec` — conservado en rama `feat/fault-injector`)
+
+> [!NOTE]
+> **Estado en Git (`feat/fault-injector`):** Toda la implementación hardware del inyector de fallos (`rtl/periph/fault_injector.v`, `rtl/top/soc_fi_top.v`, `rtl/top/soc_core.v`, `fpga/nexys_a7/Nexys-A7-100T-FI.xdc`, `sw/apps/fi_bench/main.c`, `tb/tb_fault_injector.v`, `tb/tb_fault_campaign.v` y los hooks `ENABLE_FI`) se conserva íntegra en la rama dedicada **`feat/fault-injector`**, manteniendo en `main` el diseño base limpio sin puertos ni parámetros `ENABLE_FI`.
 
 ### Objetivo
 Definir la arquitectura, interfaz y metodología de verificación de un mecanismo de inyección de fallos desacoplado del SoC (válido tanto en simulación RTL como en hardware sobre la **Nexys A7-100T**), cerrando las decisiones de diseño de la Fase 1 y alineando el criterio de evaluación experimental con el artículo de referencia de **HARV** ([`harv_notes.md`](harv_notes.md#L190)).
@@ -404,9 +407,9 @@ Definir la arquitectura, interfaz y metodología de verificación de un mecanism
 
 ---
 
-### Hitos 4 y 5 (Fase 1 Completa): Demo Nexys A7 (`FI=0/1`), Campaña HARV (1,000 corridas) y Ablación TMR×ECC
+### Hitos 4 y 5 (Fase 1 Completa — rama `feat/fault-injector`): Demo Nexys A7 (`FI=0/1`), Campaña HARV (1,000 corridas) y Ablación TMR×ECC
 
-- **Ramas integradas:** `feat/nexys-fi-demo` -> `main`, y cierre en `tb/fault-campaign` -> `main`.
+- **Rama dedicada donde se conserva este desarrollo:** `feat/fault-injector` (retirado de `main` para dejar el diseño base sin hooks `ENABLE_FI`).
 - **Revisión arquitectónica de `VIVADO_ECC_IP_FI` (Hito 4):**
   - Se actualiza y sustituye la nota preliminar de Hito 1 que planteaba omitir `blk_mem_gen_dmem_ecc` cuando `FI=1`. Para mantener exactamente el mismo flujo de memoria IP de Xilinx en Vivado, [create_project.tcl](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/create_project.tcl) recibe `-tclargs $(FI)` desde el [Makefile](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/Makefile):
     - `FI=0` (vuelo): top `soc`, [Nexys-A7-100T-Master.xdc](file:///Users/julianhinojosagil/Documents/Dev/HPicoRV32/fpga/nexys_a7/Nexys-A7-100T-Master.xdc) y defines `{VIVADO_MEM_INIT=1 VIVADO_ECC_IP=1}`.
@@ -488,7 +491,7 @@ Dotar a **HPicoRV32** de un mecanismo ultraligero de captura y diagnóstico de e
 
 ### Arquitectura y cambios implementados
 
-1. **Separación en hardware entre *Soft-Trap* y *Hard-Trap* ([`picorv32.v`](../rtl/core/picorv32.v), [`soc_core.v`](../rtl/top/soc_core.v)):**
+1. **Separación en hardware entre *Soft-Trap* y *Hard-Trap* ([`picorv32.v`](../rtl/core/picorv32.v), [`soc.v`](../rtl/top/soc.v)):**
    - **Por qué no usar `ENABLE_IRQ = 1` con `QREGS = 1`:** activar los 4 registros de interrupción `q0..q3` amplía `cpuregs` de 32 a 36 palabras (`regindex_bits = 6`), duplicando el consumo de primitivas `RAM32M` (`14` $\rightarrow$ `28`) e insertando multiplexores adicionales en el camino crítico de lectura asíncrona de `cpuregs`.
    - **Esquema *Soft-Trap* (cuando `trap_active == 0` y tanto `IMEM` como `cpuregs` son fiables):**
      - Ante cualquiera de las 5 causas capturables (`1 = TRAP_CAUSE_ILLINSN`, `2 = TRAP_CAUSE_BREAK`, `3 = TRAP_CAUSE_MISALIGN`, `4 = TRAP_CAUSE_HARV_WX`, `5 = TRAP_CAUSE_DMEM_DBE`), el procesador:
@@ -496,7 +499,7 @@ Dotar a **HPicoRV32** de un mecanismo ultraligero de captura y diagnóstico de e
        2. Activa `trap_active <= 1'b1`, cancela accesos en vuelo (`mem_do_*`, `latched_store`, `decoder_trigger`, `next_mem_state = 0`) y redirige `next_reg_pc = PROGADDR_TRAP` (`0x0000_0010`) reutilizando el camino de `PC` ya protegido por **TMR 2-de-3 con *self-healing***.
    - **Esquema *Hard-Trap* (`cpu_state_trap` $\rightarrow$ `cpu_trap = 1`):**
      - Si ocurre un error doble incorregible en el banco de registros (`reg_dbe_event`) o en la memoria de instrucciones (`bus_imem_dbe_i`), o bien una segunda excepción estando ya dentro del manejador (`trap_active == 1`, incluyendo el `ebreak` final de `trap_halt()`), la CPU transiciona directamente a `cpu_state_trap` sin sobrescribir `trap_epc` ni `trap_cause`.
-     - En [`soc_core.v`](../rtl/top/soc_core.v), `dmem` y `leds` permanecen accesibles durante la ejecución del *Soft-Trap* (`trap_active == 1, cpu_trap == 0`) para permitir el uso de la pila en `DMEM` y la señalización del código de error en `REG_LEDS`, bloqueando escrituras únicamente al alcanzar `cpu_trap == 1`.
+     - En [`soc.v`](../rtl/top/soc.v), `dmem` y `leds` permanecen accesibles durante la ejecución del *Soft-Trap* (`trap_active == 1, cpu_trap == 0`) para permitir el uso de la pila en `DMEM` y la señalización del código de error en `REG_LEDS`, bloqueando escrituras únicamente al alcanzar `cpu_trap == 1`.
    - **Instrucción `mret` (`32'h3020_0073`):** decodificada en un ciclo en `cpu_state_ld_rs1` (incluyendo `is_rdtrap` e `instr_mret` en `reg_instr_no_rs1` para evitar falsos *traps* por `DBE` especulativo en `rs1`), limpia `trap_active <= 1'b0` y salta a `(trap_epc + 32'd4) & 32'hffff_fffe`.
 
 2. **Vector de excepción en ensamblador y rutina C bare-metal ([`crt0.S`](../sw/boot/crt0.S), [`io.h`](../sw/common/io.h), [`counter/main.c`](../sw/apps/counter/main.c)):**
