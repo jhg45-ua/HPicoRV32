@@ -94,6 +94,7 @@ module picorv32 #(
 	parameter [31:0] LATCHED_IRQ = 32'h ffff_ffff,
 	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000,
 	parameter [31:0] PROGADDR_IRQ = 32'h 0000_0010,
+	parameter [31:0] PROGADDR_TRAP = 32'h 0000_0010,
 	parameter [31:0] STACKADDR = 32'h ffff_ffff,
 	parameter [ 0:0] ENABLE_TMR = 1,
 	parameter [ 0:0] ENABLE_ECC = 1,
@@ -175,11 +176,24 @@ module picorv32 #(
 	input      [ 3:0] fi_target_i,
 	input      [ 2:0] fi_rep_mask_i,
 	input      [38:0] fi_bit_mask_i,
-	output            fi_ack_o
+	output            fi_ack_o,
+
+	// Notificaciones síncronas de fallo de bus/memoria desde soc_core (activas en mem_ready)
+	input             bus_harv_err_i,
+	input             bus_imem_dbe_i,
+	input             bus_dmem_dbe_i
 );
 	localparam integer irq_timer = 0;
 	localparam integer irq_ebreak = 1;
 	localparam integer irq_buserror = 2;
+
+	// Códigos de diagnóstico para CSR_TRAP_CAUSE (0xCC5)
+	localparam [3:0] TRAP_CAUSE_NONE     = 4'd0;
+	localparam [3:0] TRAP_CAUSE_ILLINSN  = 4'd1;
+	localparam [3:0] TRAP_CAUSE_BREAK    = 4'd2;
+	localparam [3:0] TRAP_CAUSE_MISALIGN = 4'd3;
+	localparam [3:0] TRAP_CAUSE_HARV_WX  = 4'd4;
+	localparam [3:0] TRAP_CAUSE_DMEM_DBE = 4'd5;
 
 	localparam integer irqregs_offset = ENABLE_REGS_16_31 ? 32 : 16;
 	localparam integer regfile_size = (ENABLE_REGS_16_31 ? 32 : 16) + 4*ENABLE_IRQ*ENABLE_IRQ_QREGS;
@@ -199,6 +213,13 @@ module picorv32 #(
 
 	// Contadores de fallos ECC en banco de registros: SBU/DBU (CSRs 0xCC2 y 0xCC3)
 	reg [31:0] count_ecc_reg_sbu, count_ecc_reg_dbu;
+
+	// Registros de diagnóstico de Soft-Trap: EPC (CSR 0xCC4), CAUSE (CSR 0xCC5) y flag de anidamiento
+	reg [31:0] trap_epc;
+	reg [ 3:0] trap_cause;
+	reg        trap_active;
+	wire       soft_trap_enter;
+	wire       hard_trap_trig;
 
 	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify/Yosys
 	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
@@ -665,10 +686,10 @@ module picorv32 #(
 		// Self-healing: recarga el estado votado si la FSM no transiciona este ciclo
 		next_mem_state = mem_state;
 
-		if (!resetn || trap) begin
-			if (!resetn)
+		if (!resetn || trap || hard_trap_trig || soft_trap_enter) begin
+			if (!resetn || hard_trap_trig || soft_trap_enter)
 				next_mem_state = 0;
-			if (!resetn || mem_ready)
+			if (!resetn || mem_ready || hard_trap_trig || soft_trap_enter)
 				mem_valid <= 0;
 			mem_la_secondword <= 0;
 			prefetched_high_word <= 0;
@@ -762,6 +783,7 @@ module picorv32 #(
 	reg instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai;
 	reg instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and;
 	reg instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_ecall_ebreak, instr_fence, instr_rdtmr_pc, instr_rdtmr_ctrl, instr_rdecc_reg_sbu, instr_rdecc_reg_dbu;
+	reg instr_rdtrap_epc, instr_rdtrap_cause, instr_mret;
 	reg instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer;
 	wire instr_trap;
 
@@ -795,12 +817,15 @@ module picorv32 #(
 			instr_addi, instr_slti, instr_sltiu, instr_xori, instr_ori, instr_andi, instr_slli, instr_srli, instr_srai,
 			instr_add, instr_sub, instr_sll, instr_slt, instr_sltu, instr_xor, instr_srl, instr_sra, instr_or, instr_and,
 			instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh, instr_fence,
-			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer, instr_rdtmr_pc, instr_rdtmr_ctrl, instr_rdecc_reg_sbu, instr_rdecc_reg_dbu};
+			instr_getq, instr_setq, instr_retirq, instr_maskirq, instr_waitirq, instr_timer,
+			instr_rdtmr_pc, instr_rdtmr_ctrl, instr_rdecc_reg_sbu, instr_rdecc_reg_dbu,
+			instr_rdtrap_epc, instr_rdtrap_cause, instr_mret};
 
 	wire is_rdcycle_rdcycleh_rdinstr_rdinstrh;
-	// CSRs custom de solo lectura: TMR (0xCC0/0xCC1) y ECC de registros (0xCC2/0xCC3)
-	wire is_rdtmr = instr_rdtmr_pc || instr_rdtmr_ctrl;
-	wire is_rdecc = instr_rdecc_reg_sbu || instr_rdecc_reg_dbu;
+	// CSRs custom de solo lectura: TMR (0xCC0/0xCC1), ECC de registros (0xCC2/0xCC3) y Soft-Trap (0xCC4/0xCC5)
+	wire is_rdtmr  = instr_rdtmr_pc || instr_rdtmr_ctrl;
+	wire is_rdecc  = instr_rdecc_reg_sbu || instr_rdecc_reg_dbu;
+	wire is_rdtrap = instr_rdtrap_epc || instr_rdtrap_cause;
 	assign is_rdcycle_rdcycleh_rdinstr_rdinstrh = |{instr_rdcycle, instr_rdcycleh, instr_rdinstr, instr_rdinstrh};
 
 	reg [63:0] new_ascii_instr;
@@ -986,6 +1011,7 @@ module picorv32 #(
 			instr_jalr    <= mem_rdata_latched[6:0] == 7'b1100111 && mem_rdata_latched[14:12] == 3'b000;
 			instr_retirq  <= mem_rdata_latched[6:0] == 7'b0001011 && mem_rdata_latched[31:25] == 7'b0000010 && ENABLE_IRQ;
 			instr_waitirq <= mem_rdata_latched[6:0] == 7'b0001011 && mem_rdata_latched[31:25] == 7'b0000100 && ENABLE_IRQ;
+			instr_mret    <= mem_rdata_latched == 32'h3020_0073;
 
 			is_beq_bne_blt_bge_bltu_bgeu <= mem_rdata_latched[6:0] == 7'b1100011;
 			is_lb_lh_lw_lbu_lhu          <= mem_rdata_latched[6:0] == 7'b0000011;
@@ -1206,6 +1232,9 @@ module picorv32 #(
 			// Decodifica csrr rd, 0xCC2 (ECC reg SBU) y 0xCC3 (ECC reg DBU) (devuelven 0 si ENABLE_ECC=0)
 			instr_rdecc_reg_sbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC2, 5'd0, 3'b010});
 			instr_rdecc_reg_dbu <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC3, 5'd0, 3'b010});
+			// Decodifica csrr rd, 0xCC4 (TRAP EPC) y 0xCC5 (TRAP CAUSE) para el trap handler
+			instr_rdtrap_epc   <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC4, 5'd0, 3'b010});
+			instr_rdtrap_cause <= (mem_rdata_q[6:0] == 7'b1110011 && mem_rdata_q[31:12] == {12'hCC5, 5'd0, 3'b010});
 
 			instr_ecall_ebreak <= ((mem_rdata_q[6:0] == 7'b1110011 && !mem_rdata_q[31:21] && !mem_rdata_q[19:7]) ||
 					(COMPRESSED_ISA && mem_rdata_q[15:0] == 16'h9002));
@@ -1287,6 +1316,9 @@ module picorv32 #(
 			instr_and   <= 0;
 
 			instr_fence <= 0;
+			instr_rdtrap_epc <= 0;
+			instr_rdtrap_cause <= 0;
+			instr_mret <= 0;
 			decoded_rd <= 0; // Evita X inicial en latched_rd y en su votador tras reset
 		end
 	end
@@ -1631,6 +1663,8 @@ module picorv32 #(
 			(ENABLE_COUNTERS && is_rdcycle_rdcycleh_rdinstr_rdinstrh) ||
 			is_rdtmr ||
 			is_rdecc ||
+			is_rdtrap ||
+			instr_mret ||
 			(CATCH_ILLINSN && !WITH_PCPI && instr_trap);
 	wire reg_uses_rs1 = (cpu_state == cpu_state_ld_rs1) && !reg_instr_no_rs1 && (decoded_rs1 != 0);
 	wire reg_uses_rs2 = ((is_alu_reg_reg || is_beq_bne_blt_bge_bltu_bgeu || is_sb_sh_sw) && !instr_trap || (WITH_PCPI && instr_trap)) &&
@@ -1690,6 +1724,52 @@ module picorv32 #(
 	                  fi_hit_mem_state | fi_hit_latched_rd | fi_hit_cpuregs;
 
 	assign launch_next_insn = cpu_state == cpu_state_fetch && decoder_trigger && (!ENABLE_IRQ || irq_delay || irq_active || !(irq_pending & ~irq_mask));
+
+	// ---------------------------------------------------------------------------
+	// Clasificación combinacional de Soft-Trap (salto a PROGADDR_TRAP = 0x10) vs.
+	// Hard-Trap (parada segura inmediata en cpu_state_trap):
+	// - Soft-Trap (cuando trap_active=0 y sin DBE en cpuregs/IMEM):
+	//     1: Instrucción ilegal (TRAP_CAUSE_ILLINSN)
+	//     2: ecall / ebreak     (TRAP_CAUSE_BREAK)
+	//     3: Acceso o PC desalineado (TRAP_CAUSE_MISALIGN)
+	//     4: Violación Harvard W^X   (TRAP_CAUSE_HARV_WX)
+	//     5: DBE en lectura de DMEM  (TRAP_CAUSE_DMEM_DBE)
+	// - Hard-Trap (cpu_state_trap):
+	//     DBE en cpuregs, DBE en IMEM, o segundo trap estando ya en trap_active=1
+	//     (incluyendo el ebreak final que ejecuta el trap_handler para parar).
+	// ---------------------------------------------------------------------------
+	wire trap_insn_raw = (
+			(!WITH_PCPI && (cpu_state == cpu_state_ld_rs1) && CATCH_ILLINSN && instr_trap) ||
+			(WITH_PCPI && (ENABLE_REGS_DUALPORT ? (cpu_state == cpu_state_ld_rs1) : (cpu_state == cpu_state_ld_rs2)) &&
+			 instr_trap && !pcpi_int_ready && CATCH_ILLINSN && (pcpi_timeout || instr_ecall_ebreak)) ||
+			(!CATCH_ILLINSN && decoder_trigger_q && !decoder_pseudo_trigger_q && instr_ecall_ebreak)
+		) && !(ENABLE_IRQ && !irq_mask[irq_ebreak] && !irq_active);
+
+	wire trap_illinsn_ev  = trap_insn_raw && !instr_ecall_ebreak;
+	wire trap_break_ev    = trap_insn_raw && instr_ecall_ebreak;
+	wire trap_misalign_ev = CATCH_MISALIGN && !(ENABLE_IRQ && !irq_mask[irq_buserror] && !irq_active) && (
+			((mem_do_rdata || mem_do_wdata) && ((mem_wordsize == 0 && reg_op1[1:0] != 0) || (mem_wordsize == 1 && reg_op1[0] != 0))) ||
+			(mem_do_rinst && (COMPRESSED_ISA ? reg_pc[0] : |reg_pc[1:0]))
+		);
+	wire trap_harv_ev     = bus_harv_err_i;
+	wire trap_dmem_dbe_ev = bus_dmem_dbe_i;
+	wire trap_imem_dbe_ev = bus_imem_dbe_i;
+
+	wire soft_trap_any    = trap_illinsn_ev || trap_break_ev || trap_misalign_ev ||
+	                        trap_harv_ev    || trap_dmem_dbe_ev;
+	wire hard_fault_any   = (ENABLE_ECC && reg_dbe_event) || trap_imem_dbe_ev;
+
+	assign hard_trap_trig  = resetn && (cpu_state != cpu_state_trap) &&
+	                         (hard_fault_any || (soft_trap_any && trap_active));
+	assign soft_trap_enter = resetn && (cpu_state != cpu_state_trap) &&
+	                         soft_trap_any && !trap_active && !hard_fault_any;
+
+	wire [31:0] soft_trap_epc   = (trap_harv_ev && mem_instr) ? mem_addr : reg_pc;
+	wire [ 3:0] soft_trap_cause = trap_dmem_dbe_ev ? TRAP_CAUSE_DMEM_DBE :
+	                              trap_harv_ev     ? TRAP_CAUSE_HARV_WX  :
+	                              trap_misalign_ev ? TRAP_CAUSE_MISALIGN :
+	                              trap_break_ev    ? TRAP_CAUSE_BREAK    :
+	                                                 TRAP_CAUSE_ILLINSN;
 
 	always @(posedge clk) begin
 		// Self-healing: por defecto recarga el valor votado para reparar cualquier SEU en 1 ciclo
@@ -1792,6 +1872,9 @@ module picorv32 #(
 			irq_state <= 0;
 			eoi <= 0;
 			timer <= 0;
+			trap_epc <= 0;
+			trap_cause <= TRAP_CAUSE_NONE;
+			trap_active <= 0;
 			next_latched_rd = 0;
 			if (~STACKADDR) begin
 				latched_store <= 1;
@@ -1888,7 +1971,7 @@ module picorv32 #(
 						latched_branch <= 1;
 					end else begin
 						mem_do_rinst <= 0;
-						mem_do_prefetch <= !instr_jalr && !instr_retirq;
+						mem_do_prefetch <= !instr_jalr && !instr_retirq && !instr_mret;
 						next_cpu_state = cpu_state_ld_rs1;
 					end
 				end
@@ -1967,6 +2050,20 @@ module picorv32 #(
 					is_rdecc: begin
 						reg_out <= ENABLE_ECC ? (instr_rdecc_reg_sbu ? count_ecc_reg_sbu : count_ecc_reg_dbu) : 32'd0;
 						latched_store <= 1;
+						next_cpu_state = cpu_state_fetch;
+					end
+					// Lectura de CSRs de diagnóstico de Soft-Trap: EPC (0xCC4) y CAUSE (0xCC5)
+					is_rdtrap: begin
+						reg_out <= instr_rdtrap_epc ? trap_epc : {28'd0, trap_cause};
+						latched_store <= 1;
+						next_cpu_state = cpu_state_fetch;
+					end
+					// Retorno de Soft-Trap (mret): limpia trap_active y salta a EPC + 4
+					instr_mret: begin
+						trap_active <= 0;
+						latched_branch <= 1;
+						latched_store <= 1;
+						reg_out <= (trap_epc + 32'd4) & 32'hffff_fffe;
 						next_cpu_state = cpu_state_fetch;
 					end
 					is_lui_auipc_jal: begin
@@ -2291,13 +2388,38 @@ module picorv32 #(
 		if (set_mem_do_wdata)
 			mem_do_wdata <= 1;
 
-		// Error doble no corregible (DBE) al leer un operando real: anula captacion y salta a trap
-		if (ENABLE_ECC && resetn && reg_dbe_event) begin
+		// Gestión unificada de excepciones:
+		// - hard_trap_trig: DBE en cpuregs/IMEM o excepción dentro del handler (trap_active=1) -> parada segura.
+		// - soft_trap_enter: registra EPC (0xCC4) y CAUSE (0xCC5), cancela accesos en curso y salta a PROGADDR_TRAP.
+		if (hard_trap_trig) begin
 			mem_do_prefetch <= 0;
 			mem_do_rinst <= 0;
 			mem_do_rdata <= 0;
 			mem_do_wdata <= 0;
 			next_cpu_state = cpu_state_trap;
+		end else if (soft_trap_enter) begin
+			trap_active              <= 1'b1;
+			trap_epc                 <= soft_trap_epc;
+			trap_cause               <= soft_trap_cause;
+			next_reg_pc              = PROGADDR_TRAP;
+			next_reg_next_pc         = PROGADDR_TRAP;
+			next_latched_rd          = 0;
+			latched_store            <= 0;
+			latched_stalu            <= 0;
+			latched_branch           <= 0;
+			latched_trace            <= 0;
+			latched_is_lu            <= 0;
+			latched_is_lh            <= 0;
+			latched_is_lb            <= 0;
+			decoder_trigger          <= 0;
+			decoder_trigger_q        <= 0;
+			decoder_pseudo_trigger   <= 0;
+			decoder_pseudo_trigger_q <= 0;
+			mem_do_prefetch          <= 0;
+			mem_do_rdata             <= 0;
+			mem_do_wdata             <= 0;
+			mem_do_rinst             <= 1;
+			next_cpu_state           = cpu_state_fetch;
 		end
 
 		irq_pending <= next_irq_pending & ~MASKED_IRQ;

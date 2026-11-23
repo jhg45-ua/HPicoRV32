@@ -445,4 +445,49 @@ Definir la arquitectura, interfaz y metodología de verificación de un mecanism
 | `(0,0)` Baseline sin TMR/Reg-ECC | `1-SEU CPU (0..5)` | `1000` | `1000` | `297` (`29.7%`) (`0` / `297`) | `215` (`21.5%`) | `488` (`48.8%`) |
 | `(0,0)` Baseline sin TMR/Reg-ECC | `10-SEU CPU (0..5)` | `1000` | `5256` | `0` (`0.0%`) (`0` / `0`) | `5` (`0.5%`) | `995` (`99.5%`) |
 
-- **Etapa 2 (fallos fatales dirigidos sobre `(1,1)`):** `cpuregs` DBE (`cpu_trap=1, reg_dbu=1`), `IMEM` DBE (`ecc_fault_r=1, imem_dbu=1`), `DMEM` DBE (`ecc_fault_r=1, dmem_dbu=1`) y salto `W^X` en `reg_next_pc -> 0x2000` (`harv_fault_r=1`), todos con `trap=1` controlado. En Icarus Verilog (`+NUM_RUNS=10`), también pasó todas las etapas (`0 SDC`, `0 Hang` en `SOC_PROT`, `build/dump.vcd` de `330 MB`).
+- **Etapa 2 (fallos fatales dirigidos sobre `(1,1)`):** `cpuregs` DBE (`cpu_trap=1, reg_dbu=1`), `IMEM` DBE (`ecc_fault_r=1, imem_dbu=1`), `DMEM` DBE (`ecc_fault_r=1, dmem_dbu=1`) y salto `W^X` en `reg_next_pc -> 0x0000_2000` (`harv_fault_r=1`), todos con `trap=1` controlado. En Icarus Verilog (`+NUM_RUNS=10`), también pasó todas las etapas (`0 SDC`, `0 Hang` en `SOC_PROT`, `build/dump.vcd` de `330 MB`).
+
+---
+
+## [2026-11-23] — Vector de *Soft-Trap*, CSRs de diagnóstico (`0xCC4`/`0xCC5`) y firmware de gestión de excepciones (`feat/soft-trap`)
+
+### Objetivo
+Dotar a **HPicoRV32** de un mecanismo ultraligero de captura y diagnóstico de excepciones por software (*Soft-Trap Vector* en `PROGADDR_TRAP = 0x0000_0010`) que preserve intactas las **14 LUTRAMs (`RAM32M`)** del banco de registros y el cierre de temporización a `100 MHz`, exponiendo la dirección y la causa del fallo en dos nuevos CSRs de solo lectura (`CSR_TRAP_EPC = 0xCC4`, `CSR_TRAP_CAUSE = 0xCC5`) junto con soporte para la instrucción estándar `mret` (`0x3020_0073`) y una rutina de atención a excepciones en ensamblador/C bare-metal.
+
+### Arquitectura y cambios implementados
+
+1. **Separación en hardware entre *Soft-Trap* y *Hard-Trap* ([`picorv32.v`](../rtl/core/picorv32.v), [`soc_core.v`](../rtl/top/soc_core.v)):**
+   - **Por qué no usar `ENABLE_IRQ = 1` con `QREGS = 1`:** activar los 4 registros de interrupción `q0..q3` amplía `cpuregs` de 32 a 36 palabras (`regindex_bits = 6`), duplicando el consumo de primitivas `RAM32M` (`14` $\rightarrow$ `28`) e insertando multiplexores adicionales en el camino crítico de lectura asíncrona de `cpuregs`.
+   - **Esquema *Soft-Trap* (cuando `trap_active == 0` y tanto `IMEM` como `cpuregs` son fiables):**
+     - Ante cualquiera de las 5 causas capturables (`1 = TRAP_CAUSE_ILLINSN`, `2 = TRAP_CAUSE_BREAK`, `3 = TRAP_CAUSE_MISALIGN`, `4 = TRAP_CAUSE_HARV_WX`, `5 = TRAP_CAUSE_DMEM_DBE`), el procesador:
+       1. Registra la dirección de la instrucción causante en `trap_epc` (`CSR_TRAP_EPC = 0xCC4`; en *fetches* ilegales sobre `DMEM` registra `mem_addr = 0x0000_2000`) y el código de fallo en `trap_cause` (`CSR_TRAP_CAUSE = 0xCC5`).
+       2. Activa `trap_active <= 1'b1`, cancela accesos en vuelo (`mem_do_*`, `latched_store`, `decoder_trigger`, `next_mem_state = 0`) y redirige `next_reg_pc = PROGADDR_TRAP` (`0x0000_0010`) reutilizando el camino de `PC` ya protegido por **TMR 2-de-3 con *self-healing***.
+   - **Esquema *Hard-Trap* (`cpu_state_trap` $\rightarrow$ `cpu_trap = 1`):**
+     - Si ocurre un error doble incorregible en el banco de registros (`reg_dbe_event`) o en la memoria de instrucciones (`bus_imem_dbe_i`), o bien una segunda excepción estando ya dentro del manejador (`trap_active == 1`, incluyendo el `ebreak` final de `trap_halt()`), la CPU transiciona directamente a `cpu_state_trap` sin sobrescribir `trap_epc` ni `trap_cause`.
+     - En [`soc_core.v`](../rtl/top/soc_core.v), `dmem` y `leds` permanecen accesibles durante la ejecución del *Soft-Trap* (`trap_active == 1, cpu_trap == 0`) para permitir el uso de la pila en `DMEM` y la señalización del código de error en `REG_LEDS`, bloqueando escrituras únicamente al alcanzar `cpu_trap == 1`.
+   - **Instrucción `mret` (`32'h3020_0073`):** decodificada en un ciclo en `cpu_state_ld_rs1` (incluyendo `is_rdtrap` e `instr_mret` en `reg_instr_no_rs1` para evitar falsos *traps* por `DBE` especulativo en `rs1`), limpia `trap_active <= 1'b0` y salta a `(trap_epc + 32'd4) & 32'hffff_fffe`.
+
+2. **Vector de excepción en ensamblador y rutina C bare-metal ([`crt0.S`](../sw/boot/crt0.S), [`io.h`](../sw/common/io.h), [`counter/main.c`](../sw/apps/counter/main.c)):**
+   - **[`crt0.S`](../sw/boot/crt0.S):** salto `j _reset_init` en `0x0000_0000` alineado con `nop` hasta `.org 0x00000010` (`_trap_vector`). Reserva un marco de pila de 64 bytes en `DMEM` para salvar los 16 registros *caller-saved* de la ABI RISC-V (`ra`, `t0..t6`, `a0..a7`), llama a `jal ra, trap_handler`, restaura el contexto si retorna y ejecuta `mret`. Incluye un símbolo débil `.weak trap_handler` (`ebreak`) para aplicaciones de benchmark sin manejador propio (`fi_bench`).
+   - **[`io.h`](../sw/common/io.h) y [`counter/main.c`](../sw/apps/counter/main.c):** helpers `trap_read_epc()`, `trap_read_cause()` y `trap_halt()`, más implementación de `trap_handler()` en C (`counter.elf`: `1388` B `.text`, `4` B `.data`, `8` B `.bss`), que escribe `REG_LEDS = 0x7000 | cause`, vuelca por UART `CAUSE`, `EPC` y los 8 contadores de diagnóstico (`PC`, `CTRL`, `SBU`, `DBU`, `ISBU`, `IDBU`, `DSBU`, `DDBU`), retornando vía `mret` ante `TRAP_CAUSE_BREAK` o ejecutando `trap_halt()` ante fallos críticos.
+
+### Verificación en simulación y campaña estadística
+- **Lint (`make lint`):** `0` errores y `0` avisos en `soc` y `soc_fi_top` (`Verilator 5.054`).
+- **Banco integral [`tb_soc.v`](../tb/tb_soc.v) (`SIM=verilator` y `SIM=iverilog` de 4 estados):**
+  - Superadas todas las pruebas de TMR (`PC=3, CTRL=4`), ECC recuperable (`SBU=3, ISBU=2, DSBU=2`), filtro especulativo `rs2` y *Hard-Trap* en `cpuregs DBE` e `IMEM DBE`.
+  - Nuevas pruebas de extremo a extremo del *Soft-Trap Handler*:
+    - `CAUSE_BREAK` (`4'd2`): captura en `0x0000_0010`, señalización `LEDs = 0x7002`, impresión UART `[HPicoRV32 TRAP] CAUSE=00000002 EPC=00000408 | PC=00000003 CTRL=00000004 SBU=00000003 DBU=00000000 ISBU=00000002 IDBU=00000000 DSBU=00000002 DDBU=00000000`, retorno con `mret` a `0x0000_040C` y continuación limpia de `main()`.
+    - `CAUSE_DMEM_DBE` (`4'd5`), `CAUSE_HARV_WX` (`4'd4`, tanto en *fetch* desde `DMEM` `0x0000_2000` como en escritura a `IMEM` `0x0000_0000`), `CAUSE_ILLINSN` (`4'd1`, con volcado UART completo y escalado a `cpu_state_trap`) y `CAUSE_MISALIGN` (`4'd3`, bloqueo de `mem_valid` y `LEDs = 0x7003`).
+- **Campaña estadística [`tb_fault_campaign.v`](../tb/tb_fault_campaign.v) (`N = 1000`):** `1000/1000` (`100.0 %`) `Match`, `0` `SDC` y `0` `Hang` en los 4 perfiles protegidos (`1-SEU` / `10-SEU` × `CPU` / `ALL`) y `4/4` pruebas fatales de Etapa 2 superadas sin regresiones.
+
+### Métricas de implementación Post-Route en `openXC7` (`xc7a100tcsg324-1` @ 100 MHz, `FI=0`)
+
+| Recurso / Métrica | Pre-Soft-Trap (`FI=0`) | Con Soft-Trap + `0xCC4/0xCC5` (`FI=0`) | Delta |
+| --- | ---: | ---: | ---: |
+| **Yosys Logic LUTs (`LUT2`–`LUT6`)** | `2617` | `2684` (`498 LUT2`, `542 LUT3`, `415 LUT4`, `988 LUT5`, `241 LUT6`) | `+67` (`+2.56 %`) |
+| **Post-route `SLICE_LUTX` (`nextpnr`)** | `3922 / 126800` (`3 %`) | `4055 / 126800` (`3 %`) | `+133` |
+| **LUTRAM (`RAM32M` / `cpuregs`)** | `14` | `14` | **`0`** |
+| **Flip-Flops (`SLICE_FFX`)** | `1360` (`1349 FDRE` + `11 FDSE`) | `1401 / 126800` (`1 %` · `1390 FDRE` + `11 FDSE`, `0` latches) | **`+41`** (`+3.01 %`) |
+| **Block RAM (`RAMB18E1`)** | `10 / 270` (`5` eq. `RAMB36`) | `10 / 270` (`3 %` · `5` eq. `RAMB36`) | **`0`** |
+| **Carry Chains (`CARRY4`)** | `178 / 15850` | `186 / 15850` (`1 %` · `184` Yosys) | `+8` |
+| **$F_{\max}$ (`u_core.clk` @ 100 MHz)** | `106.97 MHz` (`PASS`, `+652 ps`) | **`108.44 MHz`** (`PASS`, `+778 ps`, camino crítico `9.22 ns`) | **`+1.47 MHz`** |

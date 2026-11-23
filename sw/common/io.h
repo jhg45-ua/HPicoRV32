@@ -9,10 +9,19 @@
 #define CSR_TMR_CTRL_ERR 0xCC1
 #define CSR_ECC_REG_SBU  0xCC2
 #define CSR_ECC_REG_DBU  0xCC3
+#define CSR_TRAP_EPC     0xCC4
+#define CSR_TRAP_CAUSE   0xCC5
 #define REG_ECC_IMEM_SBU (*(volatile uint32_t *)0x30000000)
 #define REG_ECC_IMEM_DBU (*(volatile uint32_t *)0x30000004)
 #define REG_ECC_DMEM_SBU (*(volatile uint32_t *)0x30000008)
 #define REG_ECC_DMEM_DBU (*(volatile uint32_t *)0x3000000C)
+
+#define TRAP_CAUSE_NONE     0u
+#define TRAP_CAUSE_ILLINSN  1u
+#define TRAP_CAUSE_BREAK    2u
+#define TRAP_CAUSE_MISALIGN 3u
+#define TRAP_CAUSE_HARV_WX  4u
+#define TRAP_CAUSE_DMEM_DBE 5u
 
 #define _HPICO_READ_CSR(csr) ({             \
     uint32_t _val;                          \
@@ -31,6 +40,9 @@ static inline uint32_t tmr_read_pc_err(void)   { return HPICO_READ_CSR(CSR_TMR_P
 static inline uint32_t tmr_read_ctrl_err(void) { return HPICO_READ_CSR(CSR_TMR_CTRL_ERR); }
 static inline uint32_t ecc_read_reg_sbu(void)  { return HPICO_READ_CSR(CSR_ECC_REG_SBU); }
 static inline uint32_t ecc_read_reg_dbu(void)  { return HPICO_READ_CSR(CSR_ECC_REG_DBU); }
+static inline uint32_t trap_read_epc(void)     { return HPICO_READ_CSR(CSR_TRAP_EPC); }
+static inline uint32_t trap_read_cause(void)   { return HPICO_READ_CSR(CSR_TRAP_CAUSE); }
+static inline void     trap_halt(void)         { __asm__ volatile ("ebreak"); }
 
 static inline void putc(char c) {
     if (c == '\n') REG_UART_DATA = '\r';

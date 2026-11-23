@@ -90,9 +90,9 @@ module tb_soc;
     end
   end
 
-  // Límite de seguridad (60 ms @ 100 MHz)
+  // Límite de seguridad (100 ms @ 100 MHz)
   initial begin
-    repeat (6000000) @(posedge clk);
+    repeat (10000000) @(posedge clk);
     $display("\n[SIM FIN] Timeout alcanzado limpiamente sin trap.");
     $finish;
   end
@@ -410,6 +410,7 @@ module tb_soc;
       resetn = 1'b0;
       wait (uut.sys_resetn === 1'b0);
       expect_trap = 1'b0;
+      uart_len = 0;
       repeat (10) @(posedge clk);
       @(negedge clk);
       resetn = 1'b1;
@@ -484,22 +485,28 @@ module tb_soc;
         $finish;
       end
 
-      @(posedge clk);  // T2: soc registra ecc_fault_r -> trap=1 e incrementa DBU
+      @(posedge clk);  // T2: soc registra ecc_fault_r -> trap=1, incrementa DBU y CPU salta a 0x10
       #1;
-      if (trap !== 1'b1 || uut.count_ecc_dmem_dbu !== cnt_before + 1) begin
-        $display("[ECC FAIL] DMEM DBE trap=%b dbu=%0d @ %0t ns", trap, uut.count_ecc_dmem_dbu,
-                 $time);
+      if (trap !== 1'b1 || uut.count_ecc_dmem_dbu !== cnt_before + 1 ||
+          uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd5 ||
+          uut.cpu.reg_pc !== 32'h0000_0010) begin
+        $display("[ECC FAIL] DMEM DBE trap=%b dbu=%0d active=%b cause=%0d pc=%h @ %0t ns",
+                 trap, uut.count_ecc_dmem_dbu, uut.cpu.trap_active, uut.cpu.trap_cause,
+                 uut.cpu.reg_pc, $time);
         $finish;
       end
 
+      // Verifica que trap_handler() en C se ejecuta, lee CSR 0xCC5=5 y señaliza LEDs = 0x7005
+      wait (leds === 15'h7005);
+
       // Restaura DMEM antes del siguiente reset para las pruebas Harvard W^X
       uut.dmem.u_bram.mem[target_addr] = golden_word;
-      $display("[ECC PASS @ %0t ns] DMEM DBE fatal addr=0x%03h -> trap=1 | dmem_dbu=%0d", $time,
-               target_addr, uut.count_ecc_dmem_dbu);
+      $display("[ECC PASS @ %0t ns] DMEM DBE fatal addr=0x%03h -> Soft-Trap CAUSE=5 LEDs=0x%04h | dmem_dbu=%0d",
+               $time, target_addr, leds, uut.count_ecc_dmem_dbu);
     end
   endtask
 
-  // Comprueba que un fetch de instrucción en DMEM (0x0000_2000) activa harv_fault_r y trap=1
+  // Comprueba que un fetch de instrucción en DMEM (0x0000_2000) activa harv_fault_r, trap=1 y Soft-Trap CAUSE=4
   task check_harvard_exec_dmem;
     begin
       @(negedge clk);
@@ -536,19 +543,31 @@ module tb_soc;
         $finish;
       end
 
-      $display("[HARV PASS @ %0t ns] Fetch en DMEM (0x00002000) bloqueado -> harv_fault_r=1, trap=1",
-               $time);
+      @(posedge clk);  // T2: CPU captura EPC=0x2000, CAUSE=4 y redirige a 0x0000_0010
+      #1;
+      if (uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd4 ||
+          uut.cpu.trap_epc !== 32'h0000_2000 || uut.cpu.reg_pc !== 32'h0000_0010) begin
+        $display("[HARV FAIL] Fetch DMEM T2 @ %0t ns: active=%b cause=%0d epc=%h pc=%h",
+                 $time, uut.cpu.trap_active, uut.cpu.trap_cause, uut.cpu.trap_epc, uut.cpu.reg_pc);
+        $finish;
+      end
+
+      wait (leds === 15'h7004);
+      $display("[HARV PASS @ %0t ns] Fetch en DMEM (0x00002000) -> Soft-Trap CAUSE=4 EPC=0x%08h LEDs=0x%04h",
+               $time, uut.cpu.trap_epc, leds);
     end
   endtask
 
-  // Comprueba que una escritura hacia IMEM (0x0000_0000) queda bloqueada y activa trap=1
+  // Comprueba que una escritura hacia IMEM (0x0000_0000) queda bloqueada, activa trap=1 y Soft-Trap CAUSE=4
   task check_harvard_write_imem;
     reg [38:0] golden_imem0;
+    reg [31:0] expected_epc;
     begin
       @(negedge clk);
       while (uut.cpu.mem_la_write !== 1'b1) @(negedge clk);
 
       golden_imem0 = uut.imem.u_bram.mem[11'd0];
+      expected_epc = uut.cpu.reg_pc;
       uut.cpu.reg_op1 = 32'h0000_0000;
 
       #1;
@@ -577,9 +596,141 @@ module tb_soc;
         $finish;
       end
 
+      @(posedge clk);  // T2: CPU captura EPC, CAUSE=4 y salta a 0x0000_0010
+      #1;
+      if (uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd4 ||
+          uut.cpu.trap_epc !== expected_epc || uut.cpu.reg_pc !== 32'h0000_0010) begin
+        $display("[HARV FAIL] Escritura IMEM T2 @ %0t ns: active=%b cause=%0d epc=%h (esp %h) pc=%h",
+                 $time, uut.cpu.trap_active, uut.cpu.trap_cause, uut.cpu.trap_epc, expected_epc,
+                 uut.cpu.reg_pc);
+        $finish;
+      end
+
+      wait (leds === 15'h7004);
       $display(
-          "[HARV PASS @ %0t ns] Escritura en IMEM (0x00000000) bloqueada e IMEM intacta -> trap=1",
-          $time);
+          "[HARV PASS @ %0t ns] Escritura en IMEM (0x00000000) bloqueada -> Soft-Trap CAUSE=4 EPC=0x%08h LEDs=0x%04h",
+          $time, uut.cpu.trap_epc, leds);
+    end
+  endtask
+
+  // Verifica ciclo completo de Soft-Trap recuperable (CAUSE_BREAK=2):
+  // salto a 0x0000_0010 -> lectura de CSRs 0xCC0..0xCC5 en C -> LEDs=0x7002 + UART -> retorno mret a EPC+4
+  task check_soft_trap_break_mret;
+    reg [31:0] expected_epc;
+    begin
+      @(negedge clk);
+      while (!(uut.cpu.cpu_state === uut.cpu.cpu_state_ld_rs1 &&
+               uut.cpu.instr_addi === 1'b1 &&
+               uut.cpu.trap_active === 1'b0))
+      @(negedge clk);
+
+      expected_epc = uut.cpu.reg_pc;
+      uut.cpu.instr_addi = 1'b0;
+      uut.cpu.instr_ecall_ebreak = 1'b1;
+
+      @(posedge clk);
+      #1;
+      uut.cpu.instr_ecall_ebreak = 1'b0;
+
+      if (uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd2 ||
+          uut.cpu.trap_epc !== expected_epc || uut.cpu.reg_pc !== 32'h0000_0010 ||
+          trap !== 1'b0) begin
+        $display("[TRAP FAIL] Soft-Trap BREAK entrada @ %0t ns: active=%b cause=%0d epc=%h pc=%h trap=%b",
+                 $time, uut.cpu.trap_active, uut.cpu.trap_cause, uut.cpu.trap_epc, uut.cpu.reg_pc, trap);
+        $finish;
+      end
+
+      // Espera a que trap_handler() en C consulte CSR_TRAP_CAUSE (0xCC5) y actualice REG_LEDS
+      wait (leds === 15'h7002);
+
+      // Espera a que finalice el volcado UART, restaure contexto en crt0.S y ejecute mret
+      wait (uut.cpu.trap_active === 1'b0);
+      @(posedge clk);
+      #1;
+      if (trap !== 1'b0 || uut.cpu.reg_pc !== (expected_epc + 32'd4)) begin
+        $display("[TRAP FAIL] Soft-Trap BREAK mret @ %0t ns: pc=%h (esp %h) trap=%b",
+                 $time, uut.cpu.reg_pc, expected_epc + 32'd4, trap);
+        $finish;
+      end
+
+      // Confirma que main() continúa su ejecución normal actualizando los LEDs al siguiente valor
+      wait (leds === 15'h0012);
+      $display("[TRAP PASS @ %0t ns] Soft-Trap BREAK recuperable -> CSRs+UART OK, mret a 0x%08h y main() continua",
+               $time, expected_epc + 32'd4);
+    end
+  endtask
+
+  // Verifica Soft-Trap fatal por instrucción ilegal (CAUSE_ILLINSN=1) -> diagnóstico C + trap_halt() (cpu_trap=1)
+  task check_soft_trap_illinsn;
+    reg [31:0] expected_epc;
+    begin
+      wait (uut.uart.cfg_divider === 32'd868);
+      @(negedge clk);
+      while (!(uut.cpu.cpu_state === uut.cpu.cpu_state_ld_rs1 &&
+               uut.cpu.instr_addi === 1'b1 &&
+               uut.cpu.trap_active === 1'b0))
+      @(negedge clk);
+
+      expected_epc = uut.cpu.reg_pc;
+      uut.cpu.instr_addi = 1'b0;
+      uut.cpu.instr_ecall_ebreak = 1'b0;
+
+      @(posedge clk);
+      #1;
+      if (uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd1 ||
+          uut.cpu.trap_epc !== expected_epc || uut.cpu.reg_pc !== 32'h0000_0010) begin
+        $display("[TRAP FAIL] Soft-Trap ILLINSN entrada @ %0t ns: active=%b cause=%0d epc=%h pc=%h",
+                 $time, uut.cpu.trap_active, uut.cpu.trap_cause, uut.cpu.trap_epc, uut.cpu.reg_pc);
+        $finish;
+      end
+
+      // Verifica señalización en LEDs desde C, impresión UART completa y escalado a Hard-Trap (ebreak)
+      wait (leds === 15'h7001);
+      wait (trap === 1'b1);
+      // Deja que simpleuart termine de desplazar por ser_tx los 10 bits del último '\n' antes del reset
+      repeat (BIT_CYCLES * 11) @(posedge clk);
+      #1;
+      if (uut.cpu.cpu_state !== uut.cpu.cpu_state_trap ||
+          uut.cpu.trap_cause !== 4'd1 ||
+          uut.cpu.trap_epc !== expected_epc) begin
+        $display("[TRAP FAIL] Soft-Trap ILLINSN halt @ %0t ns: state=%b cause=%0d epc=%h",
+                 $time, uut.cpu.cpu_state, uut.cpu.trap_cause, uut.cpu.trap_epc);
+        $finish;
+      end
+
+      $display("[TRAP PASS @ %0t ns] Soft-Trap ILLINSN -> CAUSE=1 EPC=0x%08h LEDs=0x%04h + UART + Safe Halt",
+               $time, uut.cpu.trap_epc, leds);
+    end
+  endtask
+
+  // Verifica Soft-Trap fatal por dirección desalineada (CAUSE_MISALIGN=3) -> diagnóstico C + LEDs=0x7003
+  task check_soft_trap_misalign;
+    reg [31:0] expected_epc;
+    begin
+      wait (uut.uart.cfg_divider === 32'd868);
+      @(negedge clk);
+      while (!((uut.cpu.mem_do_rdata === 1'b1 || uut.cpu.mem_do_wdata === 1'b1) &&
+               uut.cpu.mem_wordsize === 2'd0 &&
+               uut.cpu.trap_active === 1'b0))
+      @(negedge clk);
+
+      expected_epc = uut.cpu.reg_pc;
+      uut.cpu.reg_op1[1:0] = 2'b10;
+
+      @(posedge clk);
+      #1;
+      if (uut.cpu.trap_active !== 1'b1 || uut.cpu.trap_cause !== 4'd3 ||
+          uut.cpu.trap_epc !== expected_epc || uut.cpu.reg_pc !== 32'h0000_0010 ||
+          uut.mem_valid !== 1'b0) begin
+        $display("[TRAP FAIL] Soft-Trap MISALIGN entrada @ %0t ns: active=%b cause=%0d epc=%h pc=%h valid=%b",
+                 $time, uut.cpu.trap_active, uut.cpu.trap_cause, uut.cpu.trap_epc, uut.cpu.reg_pc,
+                 uut.mem_valid);
+        $finish;
+      end
+
+      wait (leds === 15'h7003);
+      $display("[TRAP PASS @ %0t ns] Soft-Trap MISALIGN -> CAUSE=3 EPC=0x%08h LEDs=0x%04h",
+               $time, uut.cpu.trap_epc, leds);
     end
   endtask
 
@@ -611,10 +762,15 @@ module tb_soc;
 
     $display("[SEU/ECC OK] Campana recuperable completada sin traps ni corrupcion.");
 
-    // Espera al latido UART Contador = 1 para validar PC=3 CTRL=4 SBU=3 ISBU=2 DSBU=2 por serie
+    // Espera a LEDs = 0x0011 (justo después de terminar el latido UART Contador = 1)
+    // para probar el Soft-Trap recuperable (CAUSE_BREAK=2) con UART libre y contadores activos
+    wait (leds == 15'h0011);
+    check_soft_trap_break_mret;
+
+    // Espera al cierre del ciclo de latido en LEDs = 0x0020 antes de las pruebas fatales con reset
     wait (leds == 15'h0020);
 
-    // 4. Tres pruebas de DBE fatal separadas por reset rápido
+    // 5. Tres pruebas de DBE fatal separadas por reset rápido
     expect_trap = 1'b1;
     inject_reg_dbe_fatal(39'h4000_0001);
 
@@ -626,7 +782,7 @@ module tb_soc;
     expect_trap = 1'b1;
     inject_dmem_dbe_fatal(39'h0000_0003);
 
-    // 5. Dos pruebas de violación Harvard W^X (ejecución en DMEM y escritura en IMEM)
+    // 6. Dos pruebas de violación Harvard W^X (ejecución en DMEM y escritura en IMEM -> CAUSE=4)
     apply_reset;
     expect_trap = 1'b1;
     check_harvard_exec_dmem;
@@ -635,7 +791,16 @@ module tb_soc;
     expect_trap = 1'b1;
     check_harvard_write_imem;
 
-    $display("[SIM FIN] Verificacion integral TMR + ECC + Harvard W^X completada con exito.");
+    // 7. Dos pruebas de Soft-Trap fatal de CPU (instrucción ilegal CAUSE=1 y desalineado CAUSE=3)
+    apply_reset;
+    expect_trap = 1'b1;
+    check_soft_trap_illinsn;
+
+    apply_reset;
+    expect_trap = 1'b1;
+    check_soft_trap_misalign;
+
+    $display("[SIM FIN] Verificacion integral TMR + ECC + Harvard W^X + Soft-Trap Handler completada con exito.");
     $finish;
   end
 
