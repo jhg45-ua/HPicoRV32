@@ -19,12 +19,16 @@ static volatile uint32_t trap_handled_cnt = 0;
 // 4. Si la causa es TRAP_CAUSE_BREAK (ecall/ebreak de prueba), retorna vía mret a EPC + 4;
 //    si es un fallo crítico (ILLINSN, MISALIGN, HARV_WX, DMEM_DBE), entra en parada segura (trap_halt).
 void trap_handler(void) {
+    // 1. Leemos de los nuevos CSRs qué fallo ocurrió (0xCC5) y en qué dirección PC (0xCC4)
     uint32_t cause = trap_read_cause();
     uint32_t epc   = trap_read_epc();
 
+    // 2. Señalizamos primero en los LEDs físicos (0x7000 | cause) en apenas unos ciclos de reloj,
+    //    antes de iniciar el envío serie por UART (que tarda varios milisegundos).
     REG_LEDS = 0x7000u | (cause & 0x0Fu);
     trap_handled_cnt++;
 
+    // 3. Volcamos por UART el informe post-mortem con la causa, el EPC y los 8 contadores TMR/ECC
     puts("[HPicoRV32 TRAP] CAUSE=");
     puthex(cause);
     puts(" EPC=");
@@ -47,11 +51,15 @@ void trap_handler(void) {
     puthex(REG_ECC_DMEM_DBU);
     puts("\r\n");
 
+    // 4. Política de respuesta:
+    //    - Si fue un punto de ruptura/llamada software (CAUSE=2), retornamos a _trap_vector
+    //      para que restaure los registros de la pila y ejecute 'mret' (continúa en EPC + 4).
+    //    - Si fue un fallo hardware/seguridad crítico (1, 3, 4 o 5), detenemos la CPU en modo seguro.
     if (cause == TRAP_CAUSE_BREAK) {
-        return; // Retorna a _trap_vector -> restaura registros y ejecuta mret (EPC + 4)
+        return;
     }
 
-    trap_halt(); // Ejecuta ebreak con trap_active=1 -> escala a Hard-Trap (cpu_state_trap)
+    trap_halt();
 }
 
 void main(void) {

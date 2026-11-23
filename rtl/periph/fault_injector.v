@@ -46,7 +46,6 @@ module fault_injector #(
 );
 
   // ---------------------------------------------------------------------------
-  // Bloque 1: PRNG LFSR de 32 bits (generador pseudoaleatorio hardware)
   // Un LFSR desplaza los bits a la izquierda y mete por bit 0 el XOR de 4 bits
   // ("taps" [31, 21, 1, 0]). Con estos taps recorre los 2^32 - 1 estados sin repetir.
   // ---------------------------------------------------------------------------
@@ -67,7 +66,7 @@ module fault_injector #(
   end
 
   // ---------------------------------------------------------------------------
-  // Bloque 2: Selección sin sesgo (rejection sampling) y generador de máscaras
+  // Selección sin sesgo (rejection sampling) y generador de máscaras
   // ---------------------------------------------------------------------------
   // En vez de usar '%' (que gasta divisores enormes en FPGA y sesga hacia números bajos),
   // cogemos bits separados del LFSR (mezclados con XOR para evitar correlaciones al
@@ -161,7 +160,7 @@ module fault_injector #(
   wire [38:0] rand_bit_mask = mask_bit0 | mask_bit1;
 
   // ---------------------------------------------------------------------------
-  // Bloque 3: FSM de control (ST_IDLE -> ST_PICK -> ST_ARMED) y temporizador
+  // FSM de control (ST_IDLE -> ST_PICK -> ST_ARMED) y temporizador
   // ---------------------------------------------------------------------------
   // Separamos ST_IDLE (elige objetivo o espera intervalo) de ST_PICK (elige bit en el
   // ciclo siguiente con el LFSR ya avanzado) para eliminar sesgo y acortar caminos críticos.
@@ -171,16 +170,16 @@ module fault_injector #(
 
   localparam [31:0] TIMEOUT_LIM = (ACK_TIMEOUT > 32'd0) ? (ACK_TIMEOUT - 32'd1) : 32'd0;
 
-  reg  [ 1:0] state_q;
-  reg  [31:0] timer_q;      // Contador compartido: espera entre fallos en ST_IDLE / watchdog en ST_ARMED
-  reg  [15:0] auto_sent_q;  // Fallos armados en la campaña autónoma actual
-  reg         trig_q;       // Copia retrasada 1 ciclo de trig_i para detectar flanco de subida
+  reg [1:0] state_q;
+  reg [31:0] timer_q;  // Contador compartido: espera entre fallos en ST_IDLE / watchdog en ST_ARMED
+  reg [15:0] auto_sent_q;  // Fallos armados en la campaña autónoma actual
+  reg trig_q;  // Copia retrasada 1 ciclo de trig_i para detectar flanco de subida
   reg         armed_auto_q; // 1 = el fallo armado nació en modo autónomo; 0 = nació por botón/trig dirigido
 
-  wire        auto_active = enable_i && auto_mode_i;
+  wire auto_active = enable_i && auto_mode_i;
   // Detector de flanco de subida: aunque trig_i siga alto varios ciclos, trig_pulse dura solo 1
-  wire        trig_pulse = trig_i && !trig_q && !auto_mode_i;
-  wire        budget_ok = (max_faults_i == 16'd0) || (auto_sent_q < max_faults_i);
+  wire trig_pulse = trig_i && !trig_q && !auto_mode_i;
+  wire budget_ok = (max_faults_i == 16'd0) || (auto_sent_q < max_faults_i);
   wire [31:0] interval_eff = (|interval_i) ? interval_i : 32'd1;
   wire [31:0] interval_lim = interval_eff - 32'd1;
 
@@ -255,9 +254,9 @@ module fault_injector #(
             state_q     <= ST_IDLE;
           end else if (armed_auto_q && !auto_active) begin
             // Si el usuario apaga el modo autónomo mientras esperaba ACK (p. ej. DMEM), aborta limpio
-            fi_valid_o  <= 1'b0;
-            timer_q     <= 32'd0;
-            state_q     <= ST_IDLE;
+            fi_valid_o <= 1'b0;
+            timer_q    <= 32'd0;
+            state_q    <= ST_IDLE;
           end else if ((ACK_TIMEOUT != 32'd0) && (timer_q >= TIMEOUT_LIM)) begin
             // Watchdog de seguridad: evita quedar colgado para siempre si nadie lee el destino
             fi_valid_o   <= 1'b0;

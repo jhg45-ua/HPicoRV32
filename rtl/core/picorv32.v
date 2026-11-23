@@ -21,8 +21,9 @@
 // Proyecto:     HPicoRV32 (Hardened PicoRV32)
 // Módulo:       picorv32.v
 // Descripción:  Núcleo PicoRV32 RV32I endurecido con TMR selectivo (PC/control),
-//               banco de registros ECC Hsiao (39,32) con auto-scrubbing y CSRs
-//               de telemetría (0xCC0-0xCC3). Parámetros: ENABLE_TMR, ENABLE_ECC.
+//               banco de registros ECC Hsiao (39,32) con auto-scrubbing, vector
+//               de Soft-Trap (PROGADDR_TRAP = 0x10 con mret) y CSRs de telemetría
+//               y diagnóstico de excepciones (0xCC0-0xCC5).
 // Reloj/Reset:  clk (flanco subida) | resetn (activo bajo)
 // =============================================================================
 
@@ -94,6 +95,7 @@ module picorv32 #(
 	parameter [31:0] LATCHED_IRQ = 32'h ffff_ffff,
 	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000,
 	parameter [31:0] PROGADDR_IRQ = 32'h 0000_0010,
+	// Dirección en IMEM donde salta la CPU al ocurrir un Soft-Trap (_trap_vector en crt0.S)
 	parameter [31:0] PROGADDR_TRAP = 32'h 0000_0010,
 	parameter [31:0] STACKADDR = 32'h ffff_ffff,
 	parameter [ 0:0] ENABLE_TMR = 1,
@@ -178,7 +180,10 @@ module picorv32 #(
 	input      [38:0] fi_bit_mask_i,
 	output            fi_ack_o,
 
-	// Notificaciones síncronas de fallo de bus/memoria desde soc_core (activas en mem_ready)
+	// Notificaciones síncronas de fallo de bus/memoria desde soc_core (pulsos de 1 ciclo en mem_ready):
+	// - bus_harv_err_i : intento ilegal de escribir en IMEM o ejecutar código desde DMEM (W^X)
+	// - bus_imem_dbe_i : error doble incorregible (DBE) al leer una instrucción de IMEM -> Hard-Trap
+	// - bus_dmem_dbe_i : error doble incorregible (DBE) al leer un dato de DMEM -> Soft-Trap
 	input             bus_harv_err_i,
 	input             bus_imem_dbe_i,
 	input             bus_dmem_dbe_i
@@ -187,13 +192,14 @@ module picorv32 #(
 	localparam integer irq_ebreak = 1;
 	localparam integer irq_buserror = 2;
 
-	// Códigos de diagnóstico para CSR_TRAP_CAUSE (0xCC5)
-	localparam [3:0] TRAP_CAUSE_NONE     = 4'd0;
-	localparam [3:0] TRAP_CAUSE_ILLINSN  = 4'd1;
-	localparam [3:0] TRAP_CAUSE_BREAK    = 4'd2;
-	localparam [3:0] TRAP_CAUSE_MISALIGN = 4'd3;
-	localparam [3:0] TRAP_CAUSE_HARV_WX  = 4'd4;
-	localparam [3:0] TRAP_CAUSE_DMEM_DBE = 4'd5;
+	// Códigos numéricos que el hardware graba en CSR_TRAP_CAUSE (0xCC5) al saltar al trap_handler:
+	// Permiten al código C saber con un simple switch/if qué fallo provocó la excepción.
+	localparam [3:0] TRAP_CAUSE_NONE     = 4'd0; // Sin excepción registrada tras reset
+	localparam [3:0] TRAP_CAUSE_ILLINSN  = 4'd1; // Opcode desconocido o instrucción no soportada
+	localparam [3:0] TRAP_CAUSE_BREAK    = 4'd2; // Instrucción ecall o ebreak desde software
+	localparam [3:0] TRAP_CAUSE_MISALIGN = 4'd3; // Dirección de lw/sw/lh/sh o PC no alineada
+	localparam [3:0] TRAP_CAUSE_HARV_WX  = 4'd4; // Violación Harvard W^X (escritura IMEM / ejecución DMEM)
+	localparam [3:0] TRAP_CAUSE_DMEM_DBE = 4'd5; // Error doble ECC (2 bits) al leer datos de DMEM
 
 	localparam integer irqregs_offset = ENABLE_REGS_16_31 ? 32 : 16;
 	localparam integer regfile_size = (ENABLE_REGS_16_31 ? 32 : 16) + 4*ENABLE_IRQ*ENABLE_IRQ_QREGS;
@@ -214,7 +220,12 @@ module picorv32 #(
 	// Contadores de fallos ECC en banco de registros: SBU/DBU (CSRs 0xCC2 y 0xCC3)
 	reg [31:0] count_ecc_reg_sbu, count_ecc_reg_dbu;
 
-	// Registros de diagnóstico de Soft-Trap: EPC (CSR 0xCC4), CAUSE (CSR 0xCC5) y flag de anidamiento
+	// Registros de diagnóstico de Soft-Trap (solo 37 flip-flops en total, sin tocar las 14 RAM32M):
+	// - trap_epc    (CSR 0xCC4): guarda la dirección PC donde ocurrió el fallo.
+	// - trap_cause  (CSR 0xCC5): guarda el código 1..5 del motivo del fallo.
+	// - trap_active (1 bit)    : vale 1 mientras la CPU está dentro de _trap_vector / trap_handler().
+	//                            Si ocurre otro trap estando trap_active=1 (o el ebreak final de parada),
+	//                            evita un bucle infinito y escala directamente a Hard-Trap (cpu_state_trap).
 	reg [31:0] trap_epc;
 	reg [ 3:0] trap_cause;
 	reg        trap_active;
@@ -686,6 +697,9 @@ module picorv32 #(
 		// Self-healing: recarga el estado votado si la FSM no transiciona este ciclo
 		next_mem_state = mem_state;
 
+		// Si hay reset, parada definitiva (trap) o un evento nuevo de Hard/Soft-Trap,
+		// devolvemos la máquina de estados del bus a reposo (0) y bajamos mem_valid
+		// para no dejar ninguna transacción colgada antes de saltar a 0x0000_0010.
 		if (!resetn || trap || hard_trap_trig || soft_trap_enter) begin
 			if (!resetn || hard_trap_trig || soft_trap_enter)
 				next_mem_state = 0;
@@ -1011,6 +1025,8 @@ module picorv32 #(
 			instr_jalr    <= mem_rdata_latched[6:0] == 7'b1100111 && mem_rdata_latched[14:12] == 3'b000;
 			instr_retirq  <= mem_rdata_latched[6:0] == 7'b0001011 && mem_rdata_latched[31:25] == 7'b0000010 && ENABLE_IRQ;
 			instr_waitirq <= mem_rdata_latched[6:0] == 7'b0001011 && mem_rdata_latched[31:25] == 7'b0000100 && ENABLE_IRQ;
+			// Reconoce la instrucción estándar mret (0x3020_0073) al terminar de leerla de IMEM
+			// para desactivar el prefetch en cpu_state_fetch y saltar a EPC+4 en cpu_state_ld_rs1
 			instr_mret    <= mem_rdata_latched == 32'h3020_0073;
 
 			is_beq_bne_blt_bge_bltu_bgeu <= mem_rdata_latched[6:0] == 7'b1100011;
@@ -1659,6 +1675,9 @@ module picorv32 #(
 	// - DBE solo dispara trap si la instruccion actual consume realmente rs1 o rs2
 	//   en ld_rs1/ld_rs2, evitando falsos traps sobre operandos especulativos no usados.
 	wire reg_sbe_event = ENABLE_ECC && (cpuregs_scrub1 || cpuregs_scrub2);
+	// Lista de instrucciones que NO usan el registro fuente rs1 (p. ej. LUI, JAL, lecturas CSR o mret):
+	// evita disparar una falsa alarma de error doble (DBE) si los bits [19:15] de la instrucción
+	// apuntan por casualidad a un registro con error que esta instrucción ni siquiera va a usar.
 	wire reg_instr_no_rs1 = is_lui_auipc_jal ||
 			(ENABLE_COUNTERS && is_rdcycle_rdcycleh_rdinstr_rdinstrh) ||
 			is_rdtmr ||
@@ -1728,15 +1747,16 @@ module picorv32 #(
 	// ---------------------------------------------------------------------------
 	// Clasificación combinacional de Soft-Trap (salto a PROGADDR_TRAP = 0x10) vs.
 	// Hard-Trap (parada segura inmediata en cpu_state_trap):
-	// - Soft-Trap (cuando trap_active=0 y sin DBE en cpuregs/IMEM):
+	// - Soft-Trap (cuando trap_active=0 y tanto IMEM como cpuregs siguen sanos):
 	//     1: Instrucción ilegal (TRAP_CAUSE_ILLINSN)
 	//     2: ecall / ebreak     (TRAP_CAUSE_BREAK)
 	//     3: Acceso o PC desalineado (TRAP_CAUSE_MISALIGN)
 	//     4: Violación Harvard W^X   (TRAP_CAUSE_HARV_WX)
 	//     5: DBE en lectura de DMEM  (TRAP_CAUSE_DMEM_DBE)
-	// - Hard-Trap (cpu_state_trap):
-	//     DBE en cpuregs, DBE en IMEM, o segundo trap estando ya en trap_active=1
-	//     (incluyendo el ebreak final que ejecuta el trap_handler para parar).
+	// - Hard-Trap (cpu_state_trap -> enciende pin cpu_trap=1 y detiene la CPU):
+	//     Se activa si el fallo ocurre en cpuregs o en IMEM (no sería fiable ejecutar código),
+	//     o si ocurre una segunda excepción mientras ya estamos dentro del handler (trap_active=1),
+	//     lo cual incluye el 'ebreak' final que ejecuta trap_halt() para detener el sistema.
 	// ---------------------------------------------------------------------------
 	wire trap_insn_raw = (
 			(!WITH_PCPI && (cpu_state == cpu_state_ld_rs1) && CATCH_ILLINSN && instr_trap) ||
@@ -1745,8 +1765,10 @@ module picorv32 #(
 			(!CATCH_ILLINSN && decoder_trigger_q && !decoder_pseudo_trigger_q && instr_ecall_ebreak)
 		) && !(ENABLE_IRQ && !irq_mask[irq_ebreak] && !irq_active);
 
+	// Separamos instr_trap en 2 causas: ecall/ebreak deliberado (2) vs. opcode inválido (1)
 	wire trap_illinsn_ev  = trap_insn_raw && !instr_ecall_ebreak;
 	wire trap_break_ev    = trap_insn_raw && instr_ecall_ebreak;
+	// Detecta lw/sw no múltiplo de 4, lh/sh impar o PC de instrucción no alineado
 	wire trap_misalign_ev = CATCH_MISALIGN && !(ENABLE_IRQ && !irq_mask[irq_buserror] && !irq_active) && (
 			((mem_do_rdata || mem_do_wdata) && ((mem_wordsize == 0 && reg_op1[1:0] != 0) || (mem_wordsize == 1 && reg_op1[0] != 0))) ||
 			(mem_do_rinst && (COMPRESSED_ISA ? reg_pc[0] : |reg_pc[1:0]))
@@ -1764,6 +1786,9 @@ module picorv32 #(
 	assign soft_trap_enter = resetn && (cpu_state != cpu_state_trap) &&
 	                         soft_trap_any && !trap_active && !hard_fault_any;
 
+	// Si la violación Harvard fue intentar ejecutar código desde DMEM (mem_instr=1),
+	// guardamos en EPC la dirección ilegal de DMEM (mem_addr = 0x2000); en el resto de
+	// fallos guardamos reg_pc (la dirección de la instrucción que provocó el error).
 	wire [31:0] soft_trap_epc   = (trap_harv_ev && mem_instr) ? mem_addr : reg_pc;
 	wire [ 3:0] soft_trap_cause = trap_dmem_dbe_ev ? TRAP_CAUSE_DMEM_DBE :
 	                              trap_harv_ev     ? TRAP_CAUSE_HARV_WX  :
@@ -2053,12 +2078,15 @@ module picorv32 #(
 						next_cpu_state = cpu_state_fetch;
 					end
 					// Lectura de CSRs de diagnóstico de Soft-Trap: EPC (0xCC4) y CAUSE (0xCC5)
+					// Coloca el valor en reg_out y activa latched_store=1 para escribirlo en rd en el próximo ciclo
 					is_rdtrap: begin
 						reg_out <= instr_rdtrap_epc ? trap_epc : {28'd0, trap_cause};
 						latched_store <= 1;
 						next_cpu_state = cpu_state_fetch;
 					end
-					// Retorno de Soft-Trap (mret): limpia trap_active y salta a EPC + 4
+					// Retorno de Soft-Trap (mret): limpia trap_active=0 y usa el mecanismo de salto
+					// (latched_branch=1 + reg_out) para volver a la instrucción siguiente (trap_epc + 4).
+					// Como mret tiene rd=x0 (bits [11:7]=0), latched_store=1 no escribe en cpuregs.
 					instr_mret: begin
 						trap_active <= 0;
 						latched_branch <= 1;
@@ -2388,9 +2416,13 @@ module picorv32 #(
 		if (set_mem_do_wdata)
 			mem_do_wdata <= 1;
 
-		// Gestión unificada de excepciones:
-		// - hard_trap_trig: DBE en cpuregs/IMEM o excepción dentro del handler (trap_active=1) -> parada segura.
-		// - soft_trap_enter: registra EPC (0xCC4) y CAUSE (0xCC5), cancela accesos en curso y salta a PROGADDR_TRAP.
+		// Gestión unificada de excepciones (al final del always para prevalecer sobre cualquier estado):
+		// 1) hard_trap_trig: fallo fatal no ejecutable (DBE en cpuregs/IMEM) o segundo trap estando
+		//    ya dentro del handler (trap_active=1). Detiene la CPU en cpu_state_trap sin tocar
+		//    trap_epc ni trap_cause para conservar el diagnóstico original del fallo.
+		// 2) soft_trap_enter: guarda EPC (0xCC4) y CAUSE (0xCC5), marca trap_active=1, anula cualquier
+		//    escritura pendiente en rd (latched_store=0, next_latched_rd=0) y redirige las 3 réplicas
+		//    TMR de PC hacia PROGADDR_TRAP (0x0000_0010) para empezar a leer _trap_vector.
 		if (hard_trap_trig) begin
 			mem_do_prefetch <= 0;
 			mem_do_rinst <= 0;

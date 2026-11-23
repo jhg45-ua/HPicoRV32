@@ -155,6 +155,10 @@ module soc_core #(
       .fi_rep_mask_i (fi_rep_mask_i),
       .fi_bit_mask_i (fi_bit_mask_i),
       .fi_ack_o      (cpu_fi_ack),
+      // Notificamos a la CPU los errores de bus justo en el ciclo en que mem_ready cierra el acceso:
+      // - harv_err && bus_ready_r : intento de escribir en IMEM o ejecutar desde DMEM -> Soft-Trap (CAUSE=4)
+      // - imem_dbe                : error doble en memoria de código -> Hard-Trap directo
+      // - dmem_dbe                : error doble en memoria de datos -> Soft-Trap (CAUSE=5)
       .bus_harv_err_i(harv_err && bus_ready_r),
       .bus_imem_dbe_i(imem_dbe),
       .bus_dmem_dbe_i(dmem_dbe)
@@ -189,6 +193,8 @@ module soc_core #(
   );
 
   // DMEM: 8 KB con Hsiao SEC-DED + RMW para sb/sh y auto-scrubbing
+  // Nota: solo bloqueamos escrituras cuando la CPU entra en parada definitiva (cpu_trap=1),
+  // permitiendo que durante un Soft-Trap el manejador pueda guardar registros en la pila (DMEM).
   bram_ecc #(
       .WORDS    (DMEM_WORDS),
       .ADDR_BITS(DMEM_ADDR_BITS),
@@ -273,6 +279,7 @@ module soc_core #(
           harv_fault_r <= 1'b1;
           bus_ready_r  <= 1'b1;
         end else if (leds_sel) begin
+          // Permite que trap_handler() escriba el código de diagnóstico (0x700X) antes del halt final (cpu_trap)
           if ((|mem_wstrb) && !cpu_trap) leds <= mem_wdata[14:0];
           mmio_rdata  <= {17'b0, leds};
           bus_ready_r <= 1'b1;

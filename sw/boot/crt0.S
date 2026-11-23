@@ -1,9 +1,14 @@
 .section .init, "ax"
 .global _start
 .global main
+/* Declaramos trap_handler como símbolo débil (.weak): si tu programa en C define
+ * su propia función void trap_handler(void), el enlazador usará la tuya; si no la
+ * define (como en fi_bench), usará la etiqueta por defecto de más abajo. */
 .weak   trap_handler
 
 _start:
+    /*En el reset la CPU siempre arranca en 0x0000_0000. Saltamos a _reset_init
+     * y dejamos 3 instrucciones nop (4 * 4 = 16 bytes) para llegar justo a 0x0000_0010. */
     j    _reset_init        /* 0x0000_0000: Entrada tras Power-On Reset */
     nop                     /* 0x0000_0004: Relleno hasta PROGADDR_TRAP (0x10) */
     nop                     /* 0x0000_0008 */
@@ -11,12 +16,14 @@ _start:
 
 /* =============================================================================
  * Vector de Soft-Trap en 0x0000_0010 (PROGADDR_TRAP)
- * - Salva los 16 registros caller-saved de la ABI RISC-V (64 bytes en DMEM)
- * - Invoca trap_handler() en C
- * - Si trap_handler() retorna, restaura contexto y ejecuta mret (EPC + 4)
+ * Cuando ocurre un fallo capturable, el hardware pone PC = 0x0000_0010.
+ * Como hemos interrumpido main() en cualquier instrucción, antes de llamar a C
+ * debemos guardar en la pila (DMEM) los 16 registros temporales ("caller-saved")
+ * que una función C podría pisar (16 registros * 4 bytes = 64 bytes).
  * ============================================================================= */
 .org 0x00000010
 _trap_vector:
+    /* 1. Prólogo: abrimos hueco de 64 bytes en la pila y guardamos contexto */
     addi sp, sp, -64
     sw   ra,  0(sp)
     sw   t0,  4(sp)
@@ -35,8 +42,11 @@ _trap_vector:
     sw   t5, 56(sp)
     sw   t6, 60(sp)
 
+    /* 2. Saltamos a la rutina C de diagnóstico y gestión del trap */
     jal  ra, trap_handler
 
+    /* 3. Epílogo (solo llega aquí si trap_handler hizo 'return' en lugar de trap_halt):
+     *    recuperamos los 16 registros tal como estaban antes del fallo y cerramos la pila. */
     lw   ra,  0(sp)
     lw   t0,  4(sp)
     lw   t1,  8(sp)
@@ -54,9 +64,12 @@ _trap_vector:
     lw   t5, 56(sp)
     lw   t6, 60(sp)
     addi sp, sp, 64
-    .word 0x30200073        /* mret: limpia trap_active y salta a EPC + 4 */
+    /* 4. Instrucción mret (codificada en binario 0x30200073): le dice al hardware que
+     *    salimos del trap (trap_active = 0) y que continúe en la siguiente instrucción (EPC + 4). */
+    .word 0x30200073
 
-/* Manejador débil por defecto: escala a Hard-Trap si la app no define trap_handler */
+/* Manejador débil por defecto: si la aplicación no define trap_handler() en C,
+ * ejecuta ebreak estando ya en trap_active=1, lo que detiene la CPU en Hard-Trap. */
 trap_handler:
     ebreak
 1:  j    1b

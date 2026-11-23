@@ -613,8 +613,14 @@ module tb_soc;
     end
   endtask
 
-  // Verifica ciclo completo de Soft-Trap recuperable (CAUSE_BREAK=2):
-  // salto a 0x0000_0010 -> lectura de CSRs 0xCC0..0xCC5 en C -> LEDs=0x7002 + UART -> retorno mret a EPC+4
+  // ---------------------------------------------------------------------------
+  // Prueba 1 de Soft-Trap: Excepción recuperable por ecall/ebreak (CAUSE_BREAK = 2)
+  // - Espera a que la CPU esté en cpu_state_ld_rs1 ejecutando una instrucción normal (addi)
+  //   y fuerza durante 1 ciclo instr_ecall_ebreak=1 para simular un ecall en esa dirección.
+  // - Comprueba que el hardware guarda EPC y CAUSE=2, activa trap_active=1 y salta a 0x0000_0010.
+  // - Espera a que trap_handler() en C lea los CSRs, ponga LEDs = 0x7002, imprima por UART
+  //   y retorne con 'mret' a EPC + 4, verificando que main() sigue contando sin colgarse.
+  // ---------------------------------------------------------------------------
   task check_soft_trap_break_mret;
     reg [31:0] expected_epc;
     begin
@@ -660,7 +666,13 @@ module tb_soc;
     end
   endtask
 
-  // Verifica Soft-Trap fatal por instrucción ilegal (CAUSE_ILLINSN=1) -> diagnóstico C + trap_halt() (cpu_trap=1)
+  // ---------------------------------------------------------------------------
+  // Prueba 2 de Soft-Trap: Instrucción ilegal (CAUSE_ILLINSN = 1)
+  // - Apaga el flag instr_addi en cpu_state_ld_rs1 para que ninguna bandera de instrucción
+  //   válida esté activa (simulando un opcode desconocido/corrupto -> instr_trap=1).
+  // - Verifica el salto a 0x0000_0010 con CAUSE=1, la escritura C en LEDs=0x7001, el volcado
+  //   completo por UART y la parada segura final con trap_halt() (ebreak -> cpu_state_trap).
+  // ---------------------------------------------------------------------------
   task check_soft_trap_illinsn;
     reg [31:0] expected_epc;
     begin
@@ -703,7 +715,13 @@ module tb_soc;
     end
   endtask
 
-  // Verifica Soft-Trap fatal por dirección desalineada (CAUSE_MISALIGN=3) -> diagnóstico C + LEDs=0x7003
+  // ---------------------------------------------------------------------------
+  // Prueba 3 de Soft-Trap: Dirección de memoria desalineada (CAUSE_MISALIGN = 3)
+  // - Espera a un acceso de palabra completa (lw/sw, mem_wordsize=0) y altera los 2 bits
+  //   bajos de la dirección calculada (reg_op1[1:0] = 2'b10, no múltiplo de 4).
+  // - Verifica que el hardware aborta el acceso antes de sacar mem_valid=1 al bus,
+  //   guarda EPC y CAUSE=3, salta a 0x0000_0010 y trap_handler() señaliza LEDs=0x7003.
+  // ---------------------------------------------------------------------------
   task check_soft_trap_misalign;
     reg [31:0] expected_epc;
     begin
