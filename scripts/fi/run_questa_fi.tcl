@@ -102,7 +102,7 @@ proc check_telem_nonzero {tmr ecc} {
 
 # Armado de triggers de parada: done_flag o trap_flag
 proc arm_stop_triggers {} {
-    nowhen *
+    catch {nowhen *}
     when -label stop_done {/tb_fi_soc/done_flag == 1} { stop }
     when -label stop_trap {/tb_fi_soc/trap_flag == 1} { stop }
 }
@@ -137,3 +137,131 @@ puts "  GOLDEN OK: warmup=$warmup_cycle | total=$golden_cycles | ventana=\[$inj_
 file mkdir [file dirname $out_csv]
 set csv_fp [open $out_csv w]
 puts $csv_fp "run_id,tmr,ecc,faults_per_run,seed,outcome,uart_match,regs_logic_match,regs_phys_match,pc_match,trap_flag,trap_cause,cycles,telem_changed,inj_cycles,inj_regs,inj_bits,inj_domains,inj_is_telem"
+
+# --- ETAPA 1: CAMPAÑA SEU ---
+expr {srand($base_seed)}
+array set cnt {No_Effect 0 Latent 0 Wrong_Result 0 Timed_Out 0 Exception 0}
+set t_start [clock milliseconds]
+
+for {set r 0} {$r < $num_runs} {incr r} {
+    set run_id [expr {$run_offset + $r}]
+
+    # Sortea K ciclos distintos dentro de la ventana post-warm-up (fallos espaciados)
+    set inj_cycles {}
+    while {[llength $inj_cycles] < $k_faults} {
+        set c [expr {$inj_min + int(rand() * $inj_span)}]
+        if {[lsearch -exact $inj_cycles $c] < 0} {
+            lappend inj_cycles $c
+        }
+    }
+    set inj_cycles [lsort -integer $inj_cycles]
+
+    # Sortea K bits objetivo uniformemente a nivel de bit
+    set inj_paths {}; set inj_regs {}; set inj_bits {}; set inj_doms {}; set inj_tel {}
+    for {set j 0} {$j < $k_faults} {incr j} {
+        set tidx [expr {int(rand() * $num_targets)}]
+        set row  [lindex $targets $tidx]
+        lappend inj_paths [lindex $row 1]
+        lappend inj_regs  [lindex $row 2]
+        lappend inj_bits  [lindex $row 3]
+        lappend inj_doms  [lindex $row 4]
+        lappend inj_tel   [lindex $row 5]
+    }
+
+    # Reinicia limpio y engancha fase a +3 ns tras el primer posedge con resetn=1
+    restart -f
+    arm_stop_triggers
+    run 58ns
+
+    # Inyecta cada SEU en su ciclo sorteado mientras siga viva la ejecución
+    for {set j 0} {$j < $k_faults} {incr j} {
+        if {[examine -radix unsigned /tb_fi_soc/done_flag] == 1 ||
+            [examine -radix unsigned /tb_fi_soc/trap_flag] == 1} {
+            break
+        }
+        set target_c [lindex $inj_cycles $j]
+        set cur_c    [examine -radix unsigned /tb_fi_soc/cycle_cnt]
+        if {$target_c > $cur_c} {
+            run [expr {($target_c - $cur_c) * 10}]ns
+        }
+        if {[examine -radix unsigned /tb_fi_soc/done_flag] == 1 ||
+            [examine -radix unsigned /tb_fi_soc/trap_flag] == 1} {
+            break
+        }
+        set p [lindex $inj_paths $j]
+        set cur_bit [examine -radix binary $p]
+        set inv_bit [expr {$cur_bit eq "0" ? 1 : 0}]
+        force -deposit $p $inv_bit
+    }
+
+    # Continúa hasta fin normal, trap o timeout (3x golden_cycles)
+    if {[examine -radix unsigned /tb_fi_soc/done_flag] == 0 &&
+        [examine -radix unsigned /tb_fi_soc/trap_flag] == 0} {
+        set cur_c [examine -radix unsigned /tb_fi_soc/cycle_cnt]
+        if {$timeout_cycles > $cur_c} {
+            run [expr {($timeout_cycles - $cur_c) * 10}]ns
+        }
+    }
+
+    # Recoge oráculos y clasifica en las 5 categorías de Travessini
+    set f_done  [examine -radix unsigned /tb_fi_soc/done_flag]
+    set f_trap  [examine -radix unsigned /tb_fi_soc/trap_flag]
+    set f_cause [examine -radix unsigned /tb_fi_soc/uut/cpu/trap_cause]
+    set f_cyc   [examine -radix unsigned /tb_fi_soc/cycle_cnt]
+    set f_ulen  [examine -radix unsigned /tb_fi_soc/uart_len]
+    set f_ubyt  [examine -radix hex      /tb_fi_soc/uart_bytes]
+    set f_telem [check_telem_nonzero $cfg_tmr $cfg_ecc]
+
+    set uart_match [expr {$f_ulen == $golden_ulen && $f_ubyt eq $golden_ubytes ? 1 : 0}]
+
+    set f_arch   [capture_arch_state]
+    set pc_match [expr {[lindex $f_arch 0] eq $golden_pc ? 1 : 0}]
+    set f_regs   [lindex $f_arch 1]
+    set regs_phys_match  1
+    set regs_logic_match 1
+    for {set idx 0} {$idx < 31} {incr idx} {
+        set gv [lindex $golden_regs $idx]
+        set fv [lindex $f_regs $idx]
+        if {$fv ne $gv} {
+            set regs_phys_match 0
+            if {$cfg_ecc == 0} {
+                set regs_logic_match 0
+            } else {
+                if {[hex_hamming $fv $gv] != 1} {
+                    set regs_logic_match 0
+                }
+            }
+        }
+    }
+
+    if {$f_trap == 1} {
+        set outcome "Exception"
+    } elseif {$f_done == 0} {
+        set outcome "Timed_Out"
+    } elseif {$uart_match == 0} {
+        set outcome "Wrong_Result"
+    } elseif {$regs_logic_match == 1 && $pc_match == 1} {
+        set outcome "No_Effect"
+    } else {
+        set outcome "Latent"
+    }
+    incr cnt($outcome)
+
+    puts $csv_fp [join [list \
+        $run_id $cfg_tmr $cfg_ecc $k_faults $base_seed $outcome \
+        $uart_match $regs_logic_match $regs_phys_match $pc_match \
+        $f_trap $f_cause $f_cyc $f_telem \
+        [join $inj_cycles ";"] [join $inj_regs ";"] [join $inj_bits ";"] \
+        [join $inj_doms ";"] [join $inj_tel ";"]] ","]
+
+    if {(($r + 1) % 50 == 0) || ($r + 1 == $num_runs)} {
+        puts [format "  Progreso %d/%d | No_Effect=%d Latent=%d Wrong=%d Timeout=%d Exc=%d" \
+            [expr {$r + 1}] $num_runs $cnt(No_Effect) $cnt(Latent) $cnt(Wrong_Result) $cnt(Timed_Out) $cnt(Exception)]
+    }
+}
+
+close $csv_fp
+set elapsed [expr {[clock milliseconds] - $t_start}]
+puts [format "=== FIN: %d corridas en %.2f s (%.1f ms/corrida) -> %s ===" \
+    $num_runs [expr {$elapsed / 1000.0}] [expr {double($elapsed) / $num_runs}] $out_csv]
+quit -f
