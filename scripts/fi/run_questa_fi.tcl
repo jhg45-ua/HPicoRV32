@@ -100,8 +100,40 @@ proc check_telem_nonzero {tmr ecc} {
     return 0
 }
 
+# Armado de triggers de parada: done_flag o trap_flag
 proc arm_stop_triggers {} {
     nowhen *
     when -label stop_done {/tb_fi_soc/done_flag == 1} { stop }
     when -label stop_trap {/tb_fi_soc/trap_flag == 1} { stop }
 }
+
+# --- ETAPA 0: GOLDEN RUN (sin fallos) ---
+arm_stop_triggers
+run 2000us
+
+set g_done [examine -radix unsigned /tb_fi_soc/done_flag]
+set g_trap [examine -radix unsigned /tb_fi_soc/trap_flag]
+if {$g_done != 1 || $g_trap != 0} {
+    puts "ERROR: Golden run fallo (done=$g_done, trap=$g_trap)"
+    quit -f -code 1
+}
+
+set warmup_cycle   [examine -radix unsigned /tb_fi_soc/warmup_cycle]
+set golden_cycles  [examine -radix unsigned /tb_fi_soc/cycle_cnt]
+set golden_ulen    [examine -radix unsigned /tb_fi_soc/uart_len]
+set golden_ubytes  [examine -radix hex      /tb_fi_soc/uart_bytes]
+set g_arch         [capture_arch_state]
+set golden_pc      [lindex $g_arch 0]
+set golden_regs    [lindex $g_arch 1]
+
+set inj_min        [expr {$warmup_cycle + 1}]
+set inj_max        [expr {$golden_cycles - 1}]
+set inj_span       [expr {$inj_max - $inj_min + 1}]
+set timeout_cycles [expr {$golden_cycles * 3}]
+
+puts "  GOLDEN OK: warmup=$warmup_cycle | total=$golden_cycles | ventana=\[$inj_min..$inj_max\] | timeout=$timeout_cycles | uart_len=$golden_ulen"
+
+# Preparar fichero CSV de salida
+file mkdir [file dirname $out_csv]
+set csv_fp [open $out_csv w]
+puts $csv_fp "run_id,tmr,ecc,faults_per_run,seed,outcome,uart_match,regs_logic_match,regs_phys_match,pc_match,trap_flag,trap_cause,cycles,telem_changed,inj_cycles,inj_regs,inj_bits,inj_domains,inj_is_telem"
