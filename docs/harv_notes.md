@@ -196,33 +196,41 @@ El repositorio público `external/harv` **no incluye ningún inyector RTL ni scr
 - Diez contadores de 32 bits en CSR (`0x7C0`–`0x7C9` en `hdl/csr.vhd`), con habilitación cualificada por transacción válida (`update_pc_w`, `dmem_gnt_i and not ctl_mem_wr_w`).
 - El registro `HARDEN_CONF` (`0xBC0`) para deshabilitar la corrección en ejecución y `mimpid` (`0xF13`) para consultar las opciones sintetizadas.
 
-La campaña de fiabilidad descrita en el artículo de 2021 se ejecutó **100 % fuera del RTL** mediante scripts externos en Mentor Graphics ModelSim (siguiendo la metodología de profiling/inyección de Travessini et al., ref. [29]).
+La campaña de fiabilidad descrita en el artículo de 2021 se ejecutó **100 % fuera del RTL** mediante scripts TCL externos en Mentor Graphics ModelSim, siguiendo la metodología de *profiling* e inyección de Travessini et al. (*"Processor Core Profiling for SEU Effect Analysis"*, LATS 2018, ref. `[29]`).
 
-### 3.2. Modelos de fallo, escenarios y benchmark del artículo (Sección 5.1)
-1. **Modelos de fallo:**
-   - **SEU (lógica secuencial):** inversión de 1 bit almacenado en un flip-flop/registro aleatorio en un instante aleatorio.
-   - **SET (lógica combinacional):** inversión y congelación temporal de un bit en un nodo combinacional aleatorio en un instante aleatorio.
-2. **Escenarios de inyección:**
-   - **1 fallo** (flujo bajo) y **10 fallos** (flujo alto) por ejecución. En el escenario de 10 fallos, los 10 *bit-flips* ocurren en **instantes distintos** dentro del periodo de simulación (no representan MBUs simultáneos).
-   - **Alcance físico en HARV:** los fallos atacan únicamente los FFs/nodos de la arquitectura del procesador y los FFs del SoC (`1255` FFs en la versión sin endurecer y `1453` en la endurecida sobre Zynq), **sin inyectar en IMEM ni en DMEM**.
-3. **Configuraciones comparadas:** cuatro variantes del core aislado (*Non-hardened*, *Hamming*, *TMR*, *TMR and Hamming*) y dos variantes del SoC completo (*Non-hardened* vs. *TMR and Hamming*).
-4. **Benchmarks y límite de tiempo de simulación:** en el core aislado ejecutaron **100 experimentos** con tres cargas (*Sum of vectors*, *CCSDS-123* y *CoreMark*). Al pasar al SoC y ampliar a **1000 experimentos**, el tiempo de simulación en ModelSim obligó a descartar *CCSDS-123* y *CoreMark*, evaluando el SoC únicamente con **Sum of vectors** (suma de dos vectores unidimensionales de **300 elementos** almacenada en un tercer array).
+> **Diferencia de versión entre el paper de 2021 y `external/harv`:** el artículo de 2021 evaluó una versión anterior del core con Hamming de **6 bits** (SEC de `38` bits en `PC` y `regfile`, Fig. 3–4) y **sin CSRs** (Sec. 6.1). El submódulo actual [`external/harv`](../external/harv) corresponde a una evolución posterior con SEC-DED (`39` bits) y contadores CSR.
+
+### 3.2. Metodología de Travessini `[29]`, modelos de fallo y campañas de HARV
+El procedimiento base heredado de Travessini et al. `[29]` mediante TCL en ModelSim sigue cuatro reglas:
+1. **Muestreo uniforme a nivel de bit (FF):** se construye una lista plana de todos los biestables individuales del diseño bajo prueba y se selecciona **1 bit al azar** (sin pausar ni alterar el flujo del procesador). De este modo, el número de impactos por registro es proporcional a su tamaño en bits.
+2. **Ventana temporal post-*warm-up*:** el instante de inyección se sortea dentro del **último 80 %** del tiempo de ejecución para evitar la fase inicial de arranque.
+3. **Inyección SEU no bloqueante (`deposit`, no `freeze`):** se invierte el valor almacenado en el FF objetivo, pero el bit no queda fijado; si el circuito escribe un nuevo valor en ciclos posteriores, sobrescribe el error de forma natural.
+4. **Exclusión de SET por debajo de 125 MHz en Travessini `[29]`:** Travessini restringe su estudio a SBU/SEU en FFs (sin MBU simultáneos por ausencia de información física de *layout* en RTL), justificando que en FPGAs por debajo de `125 MHz` la probabilidad de captura de un SET combinacional es despreciable.
+
+Sobre esa base, HARV ejecuta **dos campañas diferenciadas** (Secciones 5.1, 6.1 y 6.2):
+1. **Campaña sobre el core aislado (Tablas 5 y 6, $N = 100$ corridas):**
+   - Evalúa cuatro variantes del core uniciclo (*Non-hardened*, *Hamming*, *TMR*, *TMR and Hamming*) con tres cargas (*Sum of vectors*, *CCSDS-123* y *CoreMark*).
+   - Inyecta **SEU** (Tabla 5) y **SET** (Tabla 6) en escenarios de **1 fallo** y **10 fallos espaciados** en instantes distintos (no MBU simultáneos), excluyendo IMEM y DMEM.
+   - Para **SET**, el artículo indica que invierte y congela temporalmente una señal combinacional aleatoria en un instante aleatorio (incluyendo votadores TMR, lógica de control, ALU y multiplexores), sin detallar la duración exacta del pulso ni el criterio de liberación.
+   - En 1-SEU (Tabla 5), la variante endurecida alcanza `0 %` de propagación en registros porque en el core uniciclo **el 100 % de los FFs** correspondían al `PC` y al `regfile`, ambos protegidos por Hamming (`control` y `alu` eran puramente combinacionales).
+2. **Campaña sobre el SoC completo (Tablas 8 y 9, $N = 1\,000$ corridas):**
+   - Extiende el core a **multiciclo** (FSM de 6 estados) con bus AXI4-Lite y UART (`1\,255` FFs totales en versión base y `1\,453` en endurecida sobre Zynq), comparando *Non-hardened* vs. *TMR and Hamming*.
+   - Al ampliar a `1\,000` experimentos y crecer el circuito, el tiempo de simulación en ModelSim obligó a descartar *CCSDS-123* y *CoreMark*, evaluando únicamente **Sum of vectors** (suma de dos vectores unidimensionales de **300 elementos** almacenada en un tercer array).
+   - En el SoC **solo se inyectan SEUs** (`1-SEU` y `10-SEU` espaciados), sin SET combinacionales y **sin inyectar en IMEM ni en DMEM**. Las propagaciones residuales en el SoC endurecido (`0.7 %` en 1-SEU y `6.1 %` en 10-SEU hacia UART) provienen de FFs no protegidos del bus AXI4-Lite y la UART (y de la FSM de control sin *self-healing* en el caso de múltiples fallos).
 
 ### 3.3. Oráculo de evaluación y clasificación de resultados (Tablas 8 y 9)
-1. **Ejecución *golden*:** primero ejecutan el programa sin fallos para registrar la firma de referencia en registros internos y la **salida primaria por UART**.
-2. **Criterio de clasificación (basado en Cho et al., ref. [33]):**
-   - **Match:** la aplicación completa su ejecución produciendo la salida UART correcta, con independencia del tiempo de ejecución.
-   - **Mismatch:** la aplicación finaliza pero produce valores incorrectos en UART (corrupción silenciosa de datos, SDC).
-   - **Hang:** la aplicación no produce salida o no finaliza la ejecución dentro de la ventana esperada.
-3. **Resultados de referencia en el SoC (Tabla 9):**
-   - **1-SEU:** `Match` sube de `90.9 %` (sin endurecer) a `99.3 %` (endurecido); `Mismatch` baja de `3.6 %` a `0.4 %` y `Hang` de `5.5 %` a `0.3 %`.
-   - **10-SEU:** `Match` sube de `51.8 %` a `93.9 %`; `Mismatch` baja de `29.8 %` a `4.8 %` y `Hang` de `18.4 %` a `1.3 %`.
-   - Las propagaciones residuales en el SoC endurecido se atribuyen a FFs sin protección fuera del núcleo (bus y periférico UART).
+1. **Ejecución *golden*:** primero se ejecuta el programa sin fallos para registrar la firma de referencia en registros internos y la **salida primaria por UART**.
+2. **Separación entre registros y UART en el SoC (Tablas 8 vs. 9):** HARV **no mezcla** ambas comprobaciones en una misma métrica:
+   - **Tabla 8 (`Registers` vs. `UART output`):** `Registers` reporta el porcentaje de corridas donde al menos un registro interno difiere del *golden* al finalizar (incluyendo errores **latentes** sin efecto en la salida: `45.2 %` $\rightarrow$ `1.3 %` en 1-SEU; `99.6 %` $\rightarrow$ `34.3 %` en 10-SEU). `UART output` reporta el porcentaje de corridas donde el error sí alteró la salida UART (`9.1 %` $\rightarrow$ `0.7 %` en 1-SEU; `48.2 %` $\rightarrow$ `6.1 %` en 10-SEU, igual a `Mismatch + Hang`).
+   - **Tabla 9 (categorización exclusiva de la salida UART, Cho et al. `[33]`):**
+     - **Match:** la aplicación completa su ejecución produciendo la **salida UART exacta** del *golden*, con independencia del tiempo de ejecución y aunque queden errores latentes en registros internos (`90.9 %` $\rightarrow$ `99.3 %` en 1-SEU; `51.8 %` $\rightarrow$ `93.9 %` en 10-SEU).
+     - **Mismatch:** la aplicación finaliza pero produce valores incorrectos en UART (corrupción silenciosa de datos, SDC: `3.6 %` $\rightarrow$ `0.4 %` en 1-SEU; `29.8 %` $\rightarrow$ `4.8 %` en 10-SEU).
+     - **Hang:** la aplicación no produce salida o no finaliza la ejecución dentro de la ventana esperada (`5.5 %` $\rightarrow$ `0.3 %` en 1-SEU; `18.4 %` $\rightarrow$ `1.3 %` en 10-SEU).
+3. **Relación con la taxonomía de 5 categorías de Travessini `[29]`:** Travessini desglosa los resultados en `No Effect` (salida y registros iguales al *golden*), `Latent` (salida correcta, registros distintos), `Wrong Result` (SDC), `Timed Out` (*Hang*) y `Exception` (*trap* por evento inesperado). De este modo, `Match` en la Tabla 9 de HARV equivale a `No Effect + Latent`, mientras que distinguir `Exception` permite contabilizar por separado los *traps* controlados de HPicoRV32 (*Soft-Trap* / *Hard-Trap*) antes de agruparlos para la comparativa directa con HARV.
 
-### 3.4. Criterios adoptados para la campaña de HPicoRV32 (Fase 1)
-Para mantener trazabilidad y comparabilidad directa con HARV mientras se cubren además la ejecución física en FPGA (Nexys A7-100T) y la protección de memorias (`IMEM`/`DMEM`/`W^X`) ausente en HARV:
-
-- **Inyector hardware desacoplado (`ENABLE_FI`) en Fase 1:** permite reutilizar exactamente la misma lógica de disparo y máscaras tanto en simulación (`iverilog`/`Verilator`) como a `100 MHz` en placa real sin tocar el firmware ni el diseño de vuelo (`ENABLE_FI = 0`). Una futura Fase 2 en `Verilator` podrá extender las campañas externas al 100 % de los FFs no protegidos del SoC para obtener tablas equivalentes a las Tablas 8–9 completas.
-- **Benchmark común (*Sum of vectors*, 300 elementos):** se adopta como aplicación `sw/apps/fi_bench/` para obtener un oráculo UART finito y determinista.
-- **Mismos escenarios y categorías:** soportar campañas `1-SEU` y `10-SEU` espaciados en el tiempo sobre `ENABLE_TMR ∈ {0,1} × ENABLE_REG_ECC ∈ {0,1}` (parametrizado en elaboración, sin el SPOF de `HARDEN_CONF`), diferenciando perfil **CPU-only** (comparable a HARV) y perfil **SoC completo** (con IMEM/DMEM ECC), y reportando `Match` (desglosado en *Masked/Corrected* y *Latent* mediante telemetría), `Mismatch` (SDC), `Hang` y `Trap controlado` (para fallos fatales DBE / W^X).
+### 3.4. Criterios para la evaluación de HPicoRV32
+Para comparar HPicoRV32 de forma directa y sin sesgos frente a HARV:
+- **Fase 1 archivada (`feat/fault-injector`):** la campaña con el inyector hardware desacoplado (`ENABLE_FI`, `tb_fault_campaign.v` sobre los 8 objetivos endurecidos) queda archivada en su rama dedicada y no forma parte de `main`.
+- **Replicación externa sobre `main` (estilo Travessini/HARV):** la evaluación comparativa sobre el diseño limpio de `main` debe inyectar SEUs de forma externa (sin hooks en el RTL) sobre **todos los elementos secuenciales del SoC** —incluyendo `cpuregs` aunque en FPGA se infiera como LUTRAM, además de FFs sin proteger del datapath, bus y UART—, excluyendo `IMEM` y `DMEM` para reproducir fielmente el alcance de las Tablas 8–9 de HARV.
+- **Benchmark y métricas comunes:** mantener *Sum of vectors* (300 elementos) con escenarios `1-SEU` y `10-SEU` espaciados (ventana post-*warm-up*), reportando tanto las 3 categorías de salida UART de HARV (Tabla 9) como el desglose de registros internos / *Latent* / *Trap* de Travessini (Tabla 8 y *profiling* por registro).
 
