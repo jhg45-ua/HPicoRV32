@@ -8,11 +8,13 @@
 `timescale 1 ns / 1 ps
 
 module soc #(
-    parameter integer IMEM_WORDS     = 2048,                 // 8 KB: 0x0000_0000 - 0x0000_1FFF
-    parameter integer DMEM_WORDS     = 2048,                 // 8 KB: 0x0000_2000 - 0x0000_3FFF
-    parameter [0:0]   ENABLE_TMR     = 1'b1,                 // TMR 2-de-3 en PC y control de CPU
-    parameter [0:0]   ENABLE_REG_ECC = 1'b1,                 // ECC Hsiao (39,32) en cpuregs
-    parameter         FIRMWARE_FILE  = "build/firmware.hex"
+    parameter integer IMEM_WORDS = 2048,  // 8 KB: 0x0000_0000 - 0x0000_1FFF
+    parameter integer DMEM_WORDS = 2048,  // 8 KB: 0x0000_2000 - 0x0000_3FFF
+    parameter [0:0] ENABLE_TMR = 1'b1,  // TMR 2-de-3 en PC y control de CPU
+    parameter [0:0] ENABLE_REG_ECC = 1'b1,  // ECC Hsiao (39,32) en cpuregs
+    parameter FIRMWARE_FILE = "build/firmware.hex",
+    parameter integer FATAL_MSG_LEN = 32,
+    parameter [8*FATAL_MSG_LEN-1:0] FATAL_MSG_PREFIX = "[HPicoRV32 FATAL] "
 ) (
     input             clk,     // Reloj del sistema a 100 MHz (Nexys A7 pin E3)
     input             resetn,  // Botón externo de reset activo bajo (CPU_RESETN)
@@ -74,18 +76,24 @@ module soc #(
   wire ecc_stat_sel = mem_valid && (mem_addr[31:4] == 28'h3000_000) && (mem_addr[1:0] == 2'b00);
 
   // Núcleo HPicoRV32 (RV32I) con TMR selectivo (PC/control) y ECC en cpuregs
-  wire        cpu_trap;
+  wire cpu_trap;
+  wire cpu_trap_active;
+  wire [3:0] cpu_trap_cause;
+  wire [31:0] cpu_trap_epc;
+  wire cpu_hard_trap_pulse;
+  wire cpu_hard_trap_force;
+  reg trap_uart_logged_r;  // 1 si el SW ya envió algún byte por UART durante este Soft-Trap
   wire [31:0] imem_rdata;
-  wire        imem_ready;
-  wire        imem_sbe;
-  wire        imem_dbe;
+  wire imem_ready;
+  wire imem_sbe;
+  wire imem_dbe;
   wire [31:0] dmem_rdata;
-  wire        dmem_ready;
-  wire        dmem_sbe;
-  wire        dmem_dbe;
-  reg         harv_fault_r;  // Registro enclavado (sticky FF) de violación W^X
-  reg         ecc_fault_r;   // Registro enclavado (sticky FF) de DBE incorregible en IMEM o DMEM
-  reg         bus_ready_r;   // Pulso ready de 1 ciclo para periféricos MMIO y harv_err
+  wire dmem_ready;
+  wire dmem_sbe;
+  wire dmem_dbe;
+  reg harv_fault_r;  // Registro enclavado (sticky FF) de violación W^X
+  reg ecc_fault_r;  // Registro enclavado (sticky FF) de DBE incorregible en IMEM o DMEM
+  reg bus_ready_r;  // Pulso ready de 1 ciclo para periféricos MMIO y harv_err
 
   picorv32 #(
       .ENABLE_COUNTERS     (1),
@@ -101,44 +109,49 @@ module soc #(
       .ENABLE_TMR          (ENABLE_TMR),
       .ENABLE_ECC          (ENABLE_REG_ECC)
   ) cpu (
-      .clk           (clk),
-      .resetn        (sys_resetn),
-      .trap          (cpu_trap),
-      .mem_valid     (mem_valid),
-      .mem_instr     (mem_instr),
-      .mem_ready     (mem_ready),
-      .mem_addr      (mem_addr),
-      .mem_wdata     (mem_wdata),
-      .mem_wstrb     (mem_wstrb),
-      .mem_rdata     (mem_rdata),
-      .mem_la_read   (),
-      .mem_la_write  (),
-      .mem_la_addr   (),
-      .mem_la_wdata  (),
-      .mem_la_wstrb  (),
-      .pcpi_valid    (),
-      .pcpi_insn     (),
-      .pcpi_rs1      (),
-      .pcpi_rs2      (),
-      .pcpi_wr       (1'b0),
-      .pcpi_rd       (32'h0),
-      .pcpi_wait     (1'b0),
-      .pcpi_ready    (1'b0),
-      .irq           (32'h0),
-      .eoi           (),
-      .trace_valid   (),
-      .trace_data    (),
+      .clk              (clk),
+      .resetn           (sys_resetn),
+      .trap             (cpu_trap),
+      .mem_valid        (mem_valid),
+      .mem_instr        (mem_instr),
+      .mem_ready        (mem_ready),
+      .mem_addr         (mem_addr),
+      .mem_wdata        (mem_wdata),
+      .mem_wstrb        (mem_wstrb),
+      .mem_rdata        (mem_rdata),
+      .mem_la_read      (),
+      .mem_la_write     (),
+      .mem_la_addr      (),
+      .mem_la_wdata     (),
+      .mem_la_wstrb     (),
+      .pcpi_valid       (),
+      .pcpi_insn        (),
+      .pcpi_rs1         (),
+      .pcpi_rs2         (),
+      .pcpi_wr          (1'b0),
+      .pcpi_rd          (32'h0),
+      .pcpi_wait        (1'b0),
+      .pcpi_ready       (1'b0),
+      .irq              (32'h0),
+      .eoi              (),
+      .trace_valid      (),
+      .trace_data       (),
       // Notificamos a la CPU los errores de bus justo en el ciclo en que mem_ready cierra el acceso:
       // - harv_err && bus_ready_r : intento de escribir en IMEM o ejecutar desde DMEM -> Soft-Trap (CAUSE=4)
       // - imem_dbe                : error doble en memoria de código -> Hard-Trap directo
       // - dmem_dbe                : error doble en memoria de datos -> Soft-Trap (CAUSE=5)
-      .bus_harv_err_i(harv_err && bus_ready_r),
-      .bus_imem_dbe_i(imem_dbe),
-      .bus_dmem_dbe_i(dmem_dbe)
+      .bus_harv_err_i   (harv_err && bus_ready_r),
+      .bus_imem_dbe_i   (imem_dbe),
+      .bus_dmem_dbe_i   (dmem_dbe),
+      .trap_active_o    (cpu_trap_active),
+      .trap_cause_o     (cpu_trap_cause),
+      .trap_epc_o       (cpu_trap_epc),
+      .hard_trap_pulse_o(cpu_hard_trap_pulse),
+      .hard_trap_force_o(cpu_hard_trap_force)
   );
 
   wire [IMEM_ADDR_BITS-1:0] imem_word_addr = mem_addr[IMEM_ADDR_BITS+1:2];
-  wire [31:0]               dmem_byte_off  = mem_addr - DMEM_BASE;
+  wire [              31:0] dmem_byte_off = mem_addr - DMEM_BASE;
   wire [DMEM_ADDR_BITS-1:0] dmem_word_addr = dmem_byte_off[DMEM_ADDR_BITS+1:2];
 
   // IMEM: 8 KB con Hsiao SEC-DED (READ_ONLY=1 desde bus, pero con auto-scrubbing interno)
@@ -187,18 +200,43 @@ module soc #(
   wire [31:0] uart_dat_do;
   wire        uart_dat_wait;
 
-  simpleuart uart (
+  // Emisor hardware de emergencia: se dispara en IMEM/REG DBE, doble fallo real o handler débil sin UART
+  wire        fatal_tx_start = cpu_hard_trap_pulse && (cpu_hard_trap_force || !trap_uart_logged_r);
+  wire        fatal_tx_we;
+  wire [ 7:0] fatal_tx_data;
+  wire        fatal_tx_busy;
+
+  uart_fatal_tx #(
+      .PREFIX_LEN(FATAL_MSG_LEN),
+      .PREFIX_STR(FATAL_MSG_PREFIX)
+  ) u_fatal_tx (
+      .clk        (clk),
+      .resetn     (sys_resetn),
+      .start_i    (fatal_tx_start),
+      .cause_i    (cpu_trap_cause),
+      .epc_i      (cpu_trap_epc),
+      .uart_wait_i(uart_dat_wait),
+      .uart_we_o  (fatal_tx_we),
+      .uart_data_o(fatal_tx_data),
+      .busy_o     (fatal_tx_busy)
+  );
+
+  wire sw_uart_we = uart_dat_sel && mem_wstrb[0] && !mem_ready;
+
+  simpleuart #(
+      .DEFAULT_DIV(868)
+  ) uart (
       .clk         (clk),
       .resetn      (sys_resetn),
       .ser_tx      (ser_tx),
       .ser_rx      (ser_rx),
       // Cualifica los strobes con !mem_ready para que los pulsos de control duren exactamente 1 ciclo
-      .reg_div_we  ((uart_div_sel && !mem_ready) ? mem_wstrb : 4'b0000),
+      .reg_div_we  ((uart_div_sel && !mem_ready && !fatal_tx_busy) ? mem_wstrb : 4'b0000),
       .reg_div_di  (mem_wdata),
       .reg_div_do  (uart_div_do),
-      .reg_dat_we  (uart_dat_sel && mem_wstrb[0] && !mem_ready),
-      .reg_dat_re  (uart_dat_sel && !(|mem_wstrb) && !mem_ready),
-      .reg_dat_di  (mem_wdata),
+      .reg_dat_we  (fatal_tx_busy ? fatal_tx_we : sw_uart_we),
+      .reg_dat_re  (uart_dat_sel && !(|mem_wstrb) && !mem_ready && !fatal_tx_busy),
+      .reg_dat_di  (fatal_tx_busy ? {24'h0, fatal_tx_data} : mem_wdata),
       .reg_dat_do  (uart_dat_do),
       .reg_dat_wait(uart_dat_wait)
   );
@@ -224,6 +262,7 @@ module soc #(
       bus_ready_r        <= 1'b0;
       harv_fault_r       <= 1'b0;
       ecc_fault_r        <= 1'b0;
+      trap_uart_logged_r <= 1'b0;
       mmio_rdata         <= 32'h0;
       leds               <= 15'h0;
       count_ecc_imem_sbu <= 32'h0;
@@ -238,6 +277,12 @@ module soc #(
       if (dmem_sbe) count_ecc_dmem_sbu <= count_ecc_dmem_sbu + 32'd1;
       if (dmem_dbe) count_ecc_dmem_dbu <= count_ecc_dmem_dbu + 32'd1;
       if (imem_dbe || dmem_dbe) ecc_fault_r <= 1'b1;
+
+      if (!cpu_trap_active) begin
+        trap_uart_logged_r <= 1'b0;
+      end else if (mem_valid && !mem_ready && uart_dat_sel && mem_wstrb[0] && !uart_dat_wait) begin
+        trap_uart_logged_r <= 1'b1;
+      end
 
       if (mem_valid && !mem_ready) begin
         if (harv_err) begin
