@@ -526,3 +526,28 @@ Dotar a **HPicoRV32** de un mecanismo ultraligero de captura y diagnóstico de e
 | **Block RAM (`RAMB18E1`)** | `10 / 270` (`5` eq. `RAMB36`) | `10 / 270` (`3 %` · `5` eq. `RAMB36`) | **`0`** |
 | **Carry Chains (`CARRY4`)** | `178 / 15850` | `186 / 15850` (`1 %` · `184` Yosys) | `+8` |
 | **$F_{\max}$ (`u_core.clk` @ 100 MHz)** | `106.97 MHz` (`PASS`, `+652 ps`) | **`108.44 MHz`** (`PASS`, `+778 ps`, camino crítico `9.22 ns`) | **`+1.47 MHz`** |
+
+---
+
+## [2026-11-25] — Emisor UART hardware para *Hard-Trap* y verificación SBE/DBE (`uart_fatal_tx`)
+
+### Objetivo
+Garantizar y verificar automáticamente en simulación que los errores de 1 bit (**SBE**) en `cpuregs`, `IMEM` y `DMEM` nunca detienen ni interrumpen la ejecución de la aplicación, y dotar al SoC de un mecanismo de diagnóstico por **UART** puramente hardware para los errores incorregibles (**DBE** en `IMEM`/`cpuregs`, doble fallo real en el manejador o `.weak trap_handler`) que entran directamente en *Hard-Trap* (`cpu_state_trap`).
+
+### Cambios implementados
+- **Nuevo módulo [`uart_fatal_tx.v`](../rtl/periph/uart_fatal_tx.v):** FSM mínima de 2 estados (`S_IDLE`/`S_SEND`, 45 flip-flops, Verilog-2001 puro) con prefijo personalizable por parámetro (`PREFIX_LEN` / `PREFIX_STR`, saltando relleno `8'h00`) que emite `\r\n<PREFIJO>CAUSE=0000000X EPC=YYYYYYYY\r\n` sin crear lazos combinacionales con `simpleuart.reg_dat_wait`.
+- **Núcleo [`picorv32.v`](../rtl/core/picorv32.v) y constantes en [`io.h`](../sw/common/io.h):**
+  - Nuevas causas fatales: `6 = TRAP_CAUSE_IMEM_DBE` (`EPC = mem_addr`), `7 = TRAP_CAUSE_REG_DBE` (`EPC = reg_pc`) y `8 = TRAP_CAUSE_DOUBLE` (segunda excepción real dentro de `trap_active == 1`), preservando causa/EPC originales en el `ebreak` de `trap_halt()`.
+  - Nuevas salidas registradas de diagnóstico hacia el SoC: `trap_active_o`, `trap_cause_o`, `trap_epc_o`, `hard_trap_pulse_o` y `hard_trap_force_o`.
+- **Integración en [`soc.v`](../rtl/top/soc.v):**
+  - Instanciación de `simpleuart #(.DEFAULT_DIV(868))` (115200 baudios @ 100 MHz desde el ciclo 0, válido incluso ante fallos durante `crt0.S`) y `uart_fatal_tx` parametrizado desde el *top-level* (`FATAL_MSG_PREFIX`).
+  - Flip-flop `trap_uart_logged_r` para evitar duplicar mensajes cuando `trap_handler()` en C ya escribió en la UART antes de `trap_halt()`, cubriendo a la vez el `.weak trap_handler` de `crt0.S` sin alterar `leds` en *Hard-Trap*.
+- **Banco integral [`tb_soc.v`](../tb/tb_soc.v):**
+  - Captura de líneas UART (`wait_uart_diag`) y verificación automática de prefijo + `EPC` en 8 dígitos hex.
+  - Comprobación explícita de no-parada tras SBE (`check_app_alive_after_sbe`, confirmando progreso en LEDs sin *trap* ni disparo de `u_fatal_tx`).
+  - Verificación de mensajes UART y parada controlada en `REG_DBE` (`CAUSE=7`), `IMEM_DBE` (`CAUSE=6`), `DMEM_DBE` (`CAUSE=5` desde C sin duplicado hardware) y nueva prueba de doble fallo real en el manejador (`CAUSE=8`).
+
+### Verificación en simulación
+- **Icarus Verilog (`make sim SIM_FAST=1`, `-g2001`):** PASS completo (`98.92 ms` simulados): `SBE` sin parada (`LEDs 0x0003 -> 0x0005`), `[HPicoRV32 FATAL] CAUSE=00000007 EPC=00000330`, `CAUSE=00000006 EPC=00000000`, `[HPicoRV32 TRAP] CAUSE=00000005 EPC=000002CC` (sin duplicado), Harvard `W^X`, `ILLINSN`, `MISALIGN` y `CAUSE=00000008 EPC=000001B4`.
+- **Verilator (`make sim SIM=verilator SIM_FAST=1`, v5.036):** PASS completo idéntico al ciclo (`98.92 ms`).
+- **Pendiente:** síntesis/implementación *post-route* (Vivado / openXC7) y prueba en placa Nexys A7-100T.
