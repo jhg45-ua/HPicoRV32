@@ -178,7 +178,14 @@ module picorv32 #(
 	// - bus_dmem_dbe_i : error doble incorregible (DBE) al leer un dato de DMEM -> Soft-Trap
 	input             bus_harv_err_i,
 	input             bus_imem_dbe_i,
-	input             bus_dmem_dbe_i
+	input             bus_dmem_dbe_i,
+
+	// Diagnóstico de trap hacia el SoC (para el emisor UART hardware de emergencia)
+	output            trap_active_o,
+	output     [ 3:0] trap_cause_o,
+	output     [31:0] trap_epc_o,
+	output reg        hard_trap_pulse_o, // Pulso de 1 ciclo justo al entrar en Hard-Trap
+	output reg        hard_trap_force_o  // 1 = fallo directo o doble fallo; 0 = ebreak final
 );
 	localparam integer irq_timer = 0;
 	localparam integer irq_ebreak = 1;
@@ -192,6 +199,9 @@ module picorv32 #(
 	localparam [3:0] TRAP_CAUSE_MISALIGN = 4'd3; // Dirección de lw/sw/lh/sh o PC no alineada
 	localparam [3:0] TRAP_CAUSE_HARV_WX  = 4'd4; // Violación Harvard W^X (escritura IMEM / ejecución DMEM)
 	localparam [3:0] TRAP_CAUSE_DMEM_DBE = 4'd5; // Error doble ECC (2 bits) al leer datos de DMEM
+	localparam [3:0] TRAP_CAUSE_IMEM_DBE = 4'd6; // Error doble ECC (2 bits) al leer instrucción de IMEM
+	localparam [3:0] TRAP_CAUSE_REG_DBE  = 4'd7; // Error doble ECC (2 bits) en cpuregs consumido
+	localparam [3:0] TRAP_CAUSE_DOUBLE   = 4'd8; // Segunda excepción real dentro del trap_handler
 
 	localparam integer irqregs_offset = ENABLE_REGS_16_31 ? 32 : 16;
 	localparam integer regfile_size = (ENABLE_REGS_16_31 ? 32 : 16) + 4*ENABLE_IRQ*ENABLE_IRQ_QREGS;
@@ -223,6 +233,10 @@ module picorv32 #(
 	reg        trap_active;
 	wire       soft_trap_enter;
 	wire       hard_trap_trig;
+
+	assign trap_active_o = trap_active;
+	assign trap_cause_o  = trap_cause;
+	assign trap_epc_o    = trap_epc;
 
 	// Tres réplicas físicas de PC y next_PC protegidas frente a fusión en Vivado/Synplify/Yosys
 	(* dont_touch = "true", syn_preserve = 1, keep = "true" *) reg [31:0] reg_pc_r0, reg_pc_r1, reg_pc_r2;
@@ -1765,6 +1779,8 @@ module picorv32 #(
 		next_latched_rd  = latched_rd;
 
 		trap <= 0;
+		hard_trap_pulse_o <= 1'b0;
+  		hard_trap_force_o <= 1'b0;
 		reg_sh <= 'bx;
 		reg_out <= 'bx;
 		set_mem_do_rinst = 0;
@@ -2390,6 +2406,23 @@ module picorv32 #(
 			mem_do_rdata <= 0;
 			mem_do_wdata <= 0;
 			next_cpu_state = cpu_state_trap;
+			hard_trap_pulse_o <= 1'b1;
+			if (trap_imem_dbe_ev) begin
+				trap_cause        <= TRAP_CAUSE_IMEM_DBE;
+				trap_epc          <= mem_addr;
+				hard_trap_force_o <= 1'b1;
+			end else if (ENABLE_ECC && reg_dbe_event) begin
+				trap_cause        <= TRAP_CAUSE_REG_DBE;
+				trap_epc          <= reg_pc;
+				hard_trap_force_o <= 1'b1;
+			end else if (!trap_break_ev) begin
+				// Doble fallo real estando dentro de trap_active=1 (no es ebreak de trap_halt)
+				trap_cause        <= TRAP_CAUSE_DOUBLE;
+				trap_epc          <= soft_trap_epc;
+				hard_trap_force_o <= 1'b1;
+			end
+			// Si fue ebreak en trap_active=1 (trap_halt o .weak trap_handler):
+			// conserva trap_cause/trap_epc originales y deja hard_trap_force_o = 0.
 		end else if (soft_trap_enter) begin
 			trap_active              <= 1'b1;
 			trap_epc                 <= soft_trap_epc;

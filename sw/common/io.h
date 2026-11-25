@@ -26,6 +26,9 @@
 #define TRAP_CAUSE_MISALIGN 3u  // Puntero de lectura/escritura o PC desalineado
 #define TRAP_CAUSE_HARV_WX  4u  // Violación Harvard W^X (escribir en IMEM o ejecutar en DMEM)
 #define TRAP_CAUSE_DMEM_DBE 5u  // Error doble incorregible (DBE) al leer datos de DMEM
+#define TRAP_CAUSE_IMEM_DBE 6u  // Error doble incorregible (DBE) al leer instrucción de IMEM (Hard-Trap)
+#define TRAP_CAUSE_REG_DBE  7u  // Error doble incorregible (DBE) en banco de registros cpuregs (Hard-Trap)
+#define TRAP_CAUSE_DOUBLE   8u  // Doble fallo real ocurrido dentro de trap_handler (Hard-Trap)
 
 #define _HPICO_READ_CSR(csr) ({             \
     uint32_t _val;                          \
