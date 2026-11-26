@@ -5,6 +5,7 @@
 # ==============================================================================
 
 onbreak {resume}
+onerror {quit -f -code 1}
 
 # Lee parámetros desde variables de entorno (evita problemas de comillas en -do)
 proc get_env {name default_val} {
